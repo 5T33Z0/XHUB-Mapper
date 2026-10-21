@@ -1,5 +1,7 @@
 # XHUB Mapper
 
+<img width="693" height="719" alt="screenshot" src="https://github.com/user-attachments/assets/98b83aaf-b4a3-42ca-a70d-dc24fe746f98" />
+
 ## About
 
 `xhub_mapper.py` automates ACPI-based USB port mapping using the **XHUB/HUBX method**. It analyzes your system's ACPI tables, identifies declared USB ports, helps you select the ports you want/need, and generates `SSDT-XHUB.dsl` for use with OpenCore.
