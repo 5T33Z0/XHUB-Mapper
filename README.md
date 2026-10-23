@@ -33,10 +33,11 @@ A macOS-native automation tool for **ACPI-based USB port mapping** using the **X
 
 ## Why the XHUB/HUBX Method?
 
-Traditional Hackintosh USB mapping relies on injector kexts (`USBMap.kext`, `USBToolBox.kext`, or `USBPorts.kext`). While effective, kext-based injection can break during major macOS kernel updates, interfere with sleep states, or fail when Apple changes internal USB driver personalities.
+Traditional Hackintosh USB mapping relies on injector kexts (`USBMap.kext`, `USBToolBox.kext`, or `USBPorts.kext`). While effective, kext-based injection can break during major macOS kernel updates, interfere with sleep states, or fail when Apple changes internal USB driver personalities or when switching to another SMBIOS.
 
-The **XHUB/HUBX ACPI method** (originated by [5T33Z0 / OC-Little-Translated](https://github.com/5T33Z0/OC-Little-Translated) and [samuelnotfound](https://github.com/samuelnotfound/miscellaneous-hackintosh-guides)):
-1. Disables the OEM root hub (`RHUB` / `HUBN`) exclusively under macOS using an `_STA` method check (`_OSI("Darwin")` or `OSDW()`), leaving other OSes (Windows/Linux) completely unaffected.
+The **XHUB/HUBX ACPI method** (originated by [samuelnotfound](https://github.com/samuelnotfound/miscellaneous-hackintosh-guides/tree/main/SSDT_USB_Mapping))
+
+1. Disables the OEM root hub (`RHUB` / `HUBN`) exclusively under macOS using an `_STA` method check (`_OSI("Darwin")` or [`OSDW()`](https://github.com/5T33Z0/OC-Little-Translated/tree/main/Content/01_Adding_missing_Devices_and_enabling_Features/SSDT-OSDW)), leaving other OSes (Windows/Linux) completely unaffected.
 2. Injects a companion root hub (`XHUB` / `HUBX`) that claims the hardware address (`_ADR 0x00`) under macOS.
 3. Injects only your selected active ports (up to the 15-port limit per controller) with custom `_UPC` (port capabilities) and `_PLD` (physical location) blocks.
 4. **Completely kext-less:** Survives any macOS update, system reinstall, or recovery environment without modification.
@@ -100,6 +101,7 @@ The **XHUB/HUBX ACPI method** (originated by [5T33Z0 / OC-Little-Translated](htt
 - **Operating System:** macOS Catalina (10.15) or newer.
 - **Python:** Python 3.8 or newer (included with Xcode Command Line Tools).
 - **ACPI Compiler (`iasl`):** Optional to provide manually; the script will automatically search standard paths (`MaciASL`, `/opt/homebrew/bin/iasl`, `/usr/local/bin/iasl`) or offer to download acidanthera's verified macOS binary directly into `./tools`.
+- **Must already know the active ports**: You can import existing ports data from USBMap and USBToolBox
 
 ---
 
@@ -211,6 +213,7 @@ Inside the port selection menu (`Option 2`), use the following commands:
 | `internal` | `0xFF` | **Internal device** (Bluetooth, webcam, card reader, AIO cooler) |
 
 > [!IMPORTANT]
+> 
 > **Internal Devices:** Any port powering internal hardware (such as an Intel/Broadcom Bluetooth module or a laptop webcam) **must** be set to `internal` (`0xFF`). If marked as `typea`, Bluetooth will fail to wake from sleep or disconnect randomly.
 
 ---
@@ -245,8 +248,7 @@ All tests passed.
 
 ## Credits & Acknowledgments
 
-- **[5T33Z0](https://github.com/5T33Z0)** for writing and documenting the [XHUB Method in OC-Little-Translated](https://github.com/5T33Z0/OC-Little-Translated).
-- **[samuelnotfound](https://github.com/samuelnotfound)** for the [SSDT_USB_Mapping Guide](https://github.com/samuelnotfound/miscellaneous-hackintosh-guides).
+- **[samuelnotfound](https://github.com/samuelnotfound)** for the [XHUB-Method](https://github.com/5T33Z0/OC-Little-Translated/blob/main/Content/03_USB_Fixes/ACPI_Mapping_USB_Ports/XHUB_Method/README.md).
 - **[corpnewt](https://github.com/corpnewt)** for [SSDTTime](https://github.com/corpnewt/SSDTTime) (multi-stage decompilation design) and [USBMap](https://github.com/corpnewt/USBMap).
 - **[DhinakG](https://github.com/DhinakG)** for [USBToolBox](https://github.com/USBToolBox/tool).
 - **[Acidanthera](https://github.com/acidanthera)** for OpenCore and MaciASL binaries.
