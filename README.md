@@ -47,7 +47,7 @@ The **XHUB/HUBX ACPI method** (originated by [samuelnotfound](https://github.com
 ## Key Features
 
 - **Live macOS IORegistry Introspection:** 
-  Queries IOKit via native XML plists (`ioreg -a`) to inspect hardware PCI Class Codes (`0x0C0330`), identifying which controllers actually exist and have drivers loaded. No more guessing between 4 different conditional Thunderbolt paths (`RP01`, `RP05`, `RP09`, `RP21`) defined in OEM firmware.
+  Queries IOKit via native XML plists (`ioreg -a`) to inspect hardware PCI Class Codes (`0x0C0330`), identifying which controllers actually exist and have drivers loaded. No more guessing between different conditional paths defined in OEM firmware.
 - **Deep ACPI Extraction & Disassembly:**
   - Automated multi-file `iasl` decompilation with batched namespace resolution (`-da -dl`) and fallback passes.
   - Full AST resolution across multiple SSDTs (resolving cross-table `Scope` and `External` references).
