@@ -1,260 +1,159 @@
-# XHUB Mapper (`xhub_mapper`)
+# XHUB Mapper
 
-[![Platform](https://img.shields.io/badge/Platform-macOS-lightgrey.svg)](https://apple.com)
-[![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![OpenCore](https://img.shields.io/badge/OpenCore-0.6.0%2B-informational.svg)](https://github.com/acidanthera/OpenCorePkg)
-
-A macOS-native automation tool for **ACPI-based USB port mapping** using the **XHUB/HUBX method**. 
-
-`xhub_mapper` pairs deep static ACPI table analysis (DSDT/SSDT) with **live IORegistry introspection** to accurately detect physically present xHCI controllers, eliminating "phantom" controllers while generating clean, update-proof SSDTs and updating OpenCore's `config.plist`.
+> **A beginner-friendly tool to map your Hackintosh USB ports cleanly via ACPI—no extra kexts required!**
 
 ---
 
-## Table of Contents
+## 📖 About
 
-- [Why the XHUB/HUBX Method?](#why-the-xhubhubx-method)
-- [Key Features](#key-features)
-- [How It Works](#how-it-works)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [1. Interactive Mode (Default)](#1-interactive-mode-default)
-  - [2. CLI / Scripting Mode](#2-cli--scripting-mode)
-- [Port Editor Reference](#port-editor-reference)
-  - [Navigation & Commands](#navigation--commands)
-  - [ACPI Connector Types (`_UPC`)](#acpi-connector-types-_upc)
-- [Supported Formats & Ingestion](#supported-formats--ingestion)
-- [Self-Test Suite](#self-test-suite)
-- [Credits & Acknowledgments](#credits--acknowledgments)
-- [License](#license)
+### What is USB Port Mapping?
+macOS has a built-in limit of **15 USB ports per controller**. While your PC might only have 6 or 8 physical USB sockets on the outside, a modern motherboard actually has far more logical ports under the hood. A single USB 3.0 port counts as **two ports** (one for USB 2.0 speed, and one for SuperSpeed 3.0 speed). Internal headers for Bluetooth, webcams, and front panels count as well.
 
----
+If your motherboard exceeds 15 ports and you don't configure which ones to keep, macOS will randomly drop ports, cause sleep/wake crashes, or disable your Bluetooth card.
 
-## Why the XHUB/HUBX Method?
+### What is the XHUB Method?
+Most guides recommend injecting custom `.kext` files (like `USBMap.kext` or `USBToolBox.kext`). While these work, they can break during major macOS updates.
 
-Traditional Hackintosh USB mapping relies on injector kexts (`USBMap.kext`, `USBToolBox.kext`, or `USBPorts.kext`). While effective, kext-based injection can break during major macOS kernel updates, interfere with sleep states, or fail when Apple changes internal USB driver personalities or when switching to another SMBIOS.
+The **XHUB Method** (developed by 5T33Z0 and samuelnotfound) maps your ports directly into your motherboard's firmware tables (**ACPI**):
+- **100% Kext-less:** Works purely through a tiny SSDT file (`SSDT-XHUB.aml`).
+- **Update-Proof:** Survives macOS updates, major version upgrades, and OS reinstalls.
+- **Dual-Boot Safe:** It disables the stock USB hub **only when macOS boots**. Windows and Linux continue using all ports normally.
 
-The **XHUB/HUBX ACPI method** (originated by [samuelnotfound](https://github.com/samuelnotfound/miscellaneous-hackintosh-guides/tree/main/SSDT_USB_Mapping))
-
-1. Disables the OEM root hub (`RHUB` / `HUBN`) exclusively under macOS using an `_STA` method check (`_OSI("Darwin")` or [`OSDW()`](https://github.com/5T33Z0/OC-Little-Translated/tree/main/Content/01_Adding_missing_Devices_and_enabling_Features/SSDT-OSDW)), leaving other OSes (Windows/Linux) completely unaffected.
-2. Injects a companion root hub (`XHUB` / `HUBX`) that claims the hardware address (`_ADR 0x00`) under macOS.
-3. Injects only your selected active ports (up to the 15-port limit per controller) with custom `_UPC` (port capabilities) and `_PLD` (physical location) blocks.
-4. **Completely kext-less:** Survives any macOS update, system reinstall, or recovery environment without modification.
+### What does this tool do?
+`xhub_mapper.py` takes all the tedious manual coding out of the XHUB method:
+1. **Detects Real Hardware:** Queries macOS in real time to identify which USB controllers are actually plugged in and active, ignoring phantom/ghost controllers.
+2. **Accepts Multiple Formats:** Works with your dumped ACPI tables (DSDT/SSDT) or pre-made dumps from popular tools like **USBToolBox** (`usb.json`) and **USBMap** (`USB.plist` / `USB.json`).
+3. **One-Click Installation:** Builds the SSDT, compiles it, places it into your `EFI/OC/ACPI` folder, and automatically enables it in your OpenCore `config.plist`.
 
 ---
 
-## Key Features
+## 📋 Prerequisites
 
-- **Live macOS IORegistry Introspection:** 
-  Queries IOKit via native XML plists (`ioreg -a`) to inspect hardware PCI Class Codes (`0x0C0330`), identifying which controllers actually exist and have drivers loaded. No more guessing between different conditional paths defined in OEM firmware.
-- **Deep ACPI Extraction & Disassembly:**
-  - Automated multi-file `iasl` decompilation with batched namespace resolution (`-da -dl`) and fallback passes.
-  - Full AST resolution across multiple SSDTs (resolving cross-table `Scope` and `External` references).
-  - Built-in arithmetic & bitwise ASL evaluator (`Add`, `Subtract`, `And`, `Or`, `ShiftLeft`, `ShiftRight`, etc.) to resolve dynamically calculated `_ADR` methods.
-  - Automatically preserves authentic OEM `_PLD` physical layout buffers when present in firmware.
-  - Identifies built-in Intel Bluetooth devices using ACPI `DBPN` constants.
-- **Universal Port Map Ingestion:**
-  Drop your existing port maps directly into the tool. It automatically detects and imports:
-  - **Native `ports.json`**
-  - **DhinakG's USBToolBox (`usb.json`)** (from Windows or macOS discovery dumps)
-  - **corpnewt's USBMap (`USB.json` or `USB.plist`)**
-- **Automated OpenCore Integration:**
-  Compiles the resulting `.dsl` to `.aml` and installs directly to your `EFI/OC` folder—automatically backing up `config.plist`, enabling the SSDT in `ACPI > Add`, and applying necessary controller renames (`XHC1 -> SHCI`, `EHC1 -> EH01`, etc.) in `ACPI > Patch`.
-- **Zero Third-Party Dependencies:** 
-  Written entirely using Python's standard library (`plistlib`, `subprocess`, `urllib`, `dataclasses`).
+Before using the tool, ensure you have:
+1. A Mac or running Hackintosh (macOS 10.15 Catalina or newer).
+2. [Python 3](https://www.python.org/) installed (comes pre-installed on macOS; if prompted to install Command Line Tools, click **Install**).
+3. **One of the following:**
+   - Your PC's ACPI tables (e.g. from an OpenCore `SysReport` folder or dumped via SSDTTime).
+   - *OR* a discovery file from [USBToolBox](https://github.com/USBToolBox/tool) (`usb.json`) or [USBMap](https://github.com/corpnewt/USBMap) (`USB.plist`).
 
 ---
 
-## How It Works
+## 🚀 Beginner's Guide: Step-by-Step
 
-```
-┌─────────────────────────────────┐       ┌─────────────────────────────────┐
-│     Live macOS IORegistry       │       │    ACPI Tables (DSDT / SSDTs)   │
-│  - Active PCI BDF & class-code  │       │  - Full port list (HSxx/SSxx)   │
-│  - Exact acpi-path correlation  │       │  - Native _ADR, _UPC, and _PLD  │
-└────────────────┬────────────────┘       └────────────────┬────────────────┘
-                 │                                         │
-                 └───────────────────┬─────────────────────┘
-                                     │
-                                     ▼
-                      ┌─────────────────────────────┐
-                      │    XHUB Mapper Controller   │
-                      │  - Filters ghost hubs       │
-                      │  - Validates 15-port limit  │
-                      │  - Normalizes port types    │
-                      └──────────────┬──────────────┘
-                                     │
-                                     ▼
-                      ┌─────────────────────────────┐
-                      │    SSDT-XHUB.dsl / .aml     │
-                      │  - Disables OEM RHUB (_STA) │
-                      │  - Injects XHUB under macOS │
-                      │  - Installs to OpenCore EFI │
-                      └─────────────────────────────┘
-```
+### Step 1: Download & Open the Tool
+1. Click the green **Code** button at the top of this repository and select **Download ZIP** (or clone the repository with Git).
+2. Unzip the downloaded folder.
+3. Open the **Terminal** app on your Mac (press `Cmd + Space`, type `Terminal`, and hit Enter).
+4. Type `python3 `, drag the `xhub_mapper.py` file into the Terminal window, and press **Enter**:
+   ```bash
+   python3 /path/to/xhub_mapper.py
+   ```
 
 ---
 
-## Requirements
+### Step 2: Load Your Ports
+You have two easy ways to feed your ports into the tool:
 
-- **Operating System:** macOS Catalina (10.15) or newer.
-- **Python:** Python 3.8 or newer (included with Xcode Command Line Tools).
-- **ACPI Compiler (`iasl`):** Optional to provide manually; the script will automatically search standard paths (`MaciASL`, `/opt/homebrew/bin/iasl`, `/usr/local/bin/iasl`) or offer to download acidanthera's verified macOS binary directly into `./tools`.
-- **Must already know the active ports**: You can import existing ports data from USBMap and USBToolBox
+#### Option A: Using your ACPI tables (Recommended for a clean start)
+1. In the main menu, type `1` and hit **Enter**.
+2. **Drag and drop** your ACPI folder (e.g. `SysReport/ACPI`) or your `DSDT.aml` / `.dsl` files directly into the Terminal window and hit **Enter**.
+3. If prompted to download `iasl` (the compiler), type `y` and press **Enter**.
+4. The tool will read your tables and cross-reference them with your live hardware to highlight your active controllers.
 
----
-
-## Installation
-
-Clone the repository to your Mac:
-
-```bash
-git clone https://github.com/<your-username>/xhub_mapper.git
-cd xhub_mapper
-chmod +x xhub_mapper.py
-```
+#### Option B: Importing an existing dump from USBToolBox or USBMap
+*If you already mapped your ports on Windows using USBToolBox or on macOS using USBMap:*
+1. In the main menu, type `5` and hit **Enter**.
+2. **Drag and drop** your `usb.json` or `USB.plist` file into the Terminal window and hit **Enter**.
 
 ---
 
-## Usage
-
-### 1. Interactive Mode (Default)
-
-Simply launch the script without arguments:
-
-```bash
-python3 xhub_mapper.py
-```
+### Step 3: Choose Which Ports to Keep
+1. In the main menu, type `2` and hit **Enter**.
+2. If you have more than one controller, type the number of the controller you want to edit.
+3. You will see a list of all ports (e.g., `HS01`–`HS14` for USB 2.0, `SS01`–`SS10` for SuperSpeed 3.0):
 
 ```text
- ############################################################
- #                       XHUB Mapper                        #
- ############################################################
-
- ACPI:   not loaded
- iasl:   /usr/local/bin/iasl
- Darwin Check: _OSI ("Darwin")
-
- 1. Select ACPI folder / tables (drag and drop)
- 2. Choose controllers / ports
- 3. Generate SSDT-XHUB
- 4. Save ports.json
- 5. Load ports.json (or USBToolBox / USBMap files)
- 6. Toggle Darwin check (_OSI <-> OSDW)
- Q. Quit
+  #   Port   _ADR   Use    Type            OEM    Label
+  1   HS01   0x01   [x]    typea           on     Front Left USB2
+  2   HS02   0x02   [x]    typea           on     Front Right USB2
+  ...
+ 15   SS01   0x11   [x]    usb3-a          on     Front Left USB3
 ```
 
-#### Workflow:
-1. **Load Tables (`Option 1`):** Drag and drop your OpenCore ACPI dump folder (e.g. `SysReport/ACPI`) or your DSDT + SSDT files into the terminal and hit Enter. The tool scans all tables and displays the active vs. ghost controllers detected by IORegistry.
-2. **Review & Map Ports (`Option 2`):** Pick your controller and toggle ports to include (up to 15 per controller). Set connector types (`typea`, `usb3-a`, `typec-switch`, `internal`, etc.).
-3. **Generate & Install (`Option 3`):** Generates `Results/SSDT-XHUB.dsl`, compiles it to `.aml`, and offers to install it directly to your `EFI/OC` directory.
-4. **Import Existing Discovery (`Option 5`):** If you already plugged in drives on Windows or macOS using USBToolBox or USBMap, drag and drop `usb.json` or `USB.plist` directly to auto-populate port states and comments!
-
----
-
-### 2. CLI / Scripting Mode
-
-Automate table analysis or compilation via subcommands:
-
-#### Scan ACPI Tables & Export JSON:
-```bash
-python3 xhub_mapper.py scan /path/to/SysReport/ACPI -o ports.json
-```
-
-#### Generate SSDT from Configuration:
-```bash
-python3 xhub_mapper.py generate ports.json --compile -o SSDT-XHUB.dsl
-```
-
-#### Generate, Compile, and Install to OpenCore EFI:
-```bash
-python3 xhub_mapper.py generate ports.json --compile --efi /Volumes/EFI/EFI/OC
-```
-
-#### Import Directly from USBToolBox / USBMap via CLI:
-```bash
-# Ingest USBToolBox dump directly and build compiled SSDT
-python3 xhub_mapper.py generate usb.json --compile --efi /Volumes/EFI/EFI/OC
-
-# Ingest corpnewt USBMap plist/json
-python3 xhub_mapper.py generate USB.plist --compile -o SSDT-XHUB.dsl
-```
-
----
-
-## Port Editor Reference
-
-### Navigation & Commands
-
-Inside the port selection menu (`Option 2`), use the following commands:
-
-| Command | Description | Example |
-| :--- | :--- | :--- |
-| `k <ports>` | Toggle port state (keep / drop) | `k 1,2,5-8` or `k HS01 SS01` |
-| `on <ports>` | Force select ports | `on 1 2 3` |
-| `off <ports>` | Force deselect ports | `off 4 5 6` |
-| `all` / `none` / `oem` | Select all ports / no ports / only OEM-active ports | `oem` |
-| `t <ports> <type>` | Assign port connector type | `t 1,2 usb3-a` or `t HS07 internal` |
-| `a <ports> <adr>` | Manually set the `_ADR` address | `a SS01 0x11` |
-| `a auto` | Infer missing `_ADR`s using Intel xHCI rules | `a auto` |
-| `l <port> <text>` | Assign custom label / comment | `l HS01 Front Panel Left` |
-| `d` | Done (return to main menu) | `d` |
-
-### ACPI Connector Types (`_UPC`)
-
-| Type Name | Byte Value | Description |
-| :--- | :---: | :--- |
-| `typea` | `0x00` | Standard USB 2.0 Type-A connector |
-| `usb3-a` | `0x03` | Standard USB 3.0 Type-A connector (SuperSpeed companion) |
-| `typec-hs`| `0x08` | Type-C connector operating strictly in USB 2.0 mode |
-| `typec-switch` | `0x09` | Type-C with internal hardware switch (same personality on flip) |
-| `typec-noswitch` | `0x0A` | Type-C without hardware switch (two distinct personalities on flip) |
-| `internal` | `0xFF` | **Internal device** (Bluetooth, webcam, card reader, AIO cooler) |
+#### How to edit:
+- **Toggle a port on or off:** Type `k <number>` (e.g. `k 1` or `k 1,2,5-8`) and press **Enter**.
+- **Change a port's connector type:** Type `t <number> <type>` (e.g., `t 15 usb3-a`).
+- **Label a port (so you remember what it is):** Type `l <number> <description>` (e.g., `l 1 Front USB Left`).
+- **Finish editing:** Type `d` and press **Enter** to go back.
 
 > [!IMPORTANT]
-> 
-> **Internal Devices:** Any port powering internal hardware (such as an Intel/Broadcom Bluetooth module or a laptop webcam) **must** be set to `internal` (`0xFF`). If marked as `typea`, Bluetooth will fail to wake from sleep or disconnect randomly.
+> **The 15-Port Rule:**
+> You can select a maximum of **15 ports** (`[x]`) per controller. If your count exceeds 15, uncheck ports you don't use until you are at or below 15.
+
+> [!CAUTION]
+> **Bluetooth & Webcams Must Be "Internal":**
+> If a port powers your motherboard's internal Bluetooth card or a laptop webcam, you **must** set its type to `internal`:
+> ```text
+> t 7 internal
+> ```
+> *(Replace `7` with the port number your Bluetooth is plugged into).* If this is not set to `internal`, Bluetooth will disconnect randomly or fail to wake from sleep!
 
 ---
 
-## Supported Formats & Ingestion
-
-`xhub_mapper` can ingest:
-1. **Raw Firmware Files:** `.aml` and `.dsl` files directly from `SysReport/ACPI` or dumped via SSDTTime / Clover / Linux sysfs.
-2. **Native JSON:** `ports.json` saved from previous interactive sessions.
-3. **USBToolBox JSON (`usb.json`):** Created by DhinakG's Windows/macOS discovery utility. Automatically maps `index`, translates port classes, and normalizes generic `"Port 1"` strings into valid ASL symbols (`HS01`, `SS01`).
-4. **corpnewt USBMap (`USB.json` or `USB.plist`):** Automatically decodes little-endian 32-bit hex addresses (e.g. `01000000` $\to$ `0x01`), extracts `UsbConnector` codes, and honors `#port` disabled flags.
-
----
-
-## Self-Test Suite
-
-To verify the ASL parser, math evaluators, and test live IORegistry querying on your Mac:
-
-```bash
-python3 xhub_mapper.py test
-```
-
-Expected output:
-```text
-Running verification suite...
-Live IORegistry detected 1 XHCI controller(s) on this Mac.
- - XHC at \_SB.PCI0.XHC (PCI: 00:14.0, Driver: AppleUSBXHCIPCI)
-All tests passed.
-```
+### Step 4: Generate and Install to OpenCore
+1. In the main menu, type `3` (**Generate SSDT-XHUB**) and press **Enter**.
+2. The tool will check your configuration and compile your `SSDT-XHUB.aml`.
+3. When prompted:
+   ```text
+   Drag EFI/OC folder here to install (or enter to skip):
+   ```
+   **Drag and drop your USB flash drive's or system's `EFI/OC` folder** directly into the Terminal window and hit **Enter**.
+4. The tool will automatically:
+   - Copy `SSDT-XHUB.aml` into your `EFI/OC/ACPI/` folder.
+   - Back up your `config.plist`.
+   - Add and enable `SSDT-XHUB.aml` in `config.plist -> ACPI -> Add`.
+   - Add any necessary controller rename patches (e.g. `XHC1 -> SHCI`) in `config.plist -> ACPI -> Patch`.
 
 ---
 
-## Credits & Acknowledgments
-
-- **[samuelnotfound](https://github.com/samuelnotfound)** for the [XHUB-Method](https://github.com/5T33Z0/OC-Little-Translated/blob/main/Content/03_USB_Fixes/ACPI_Mapping_USB_Ports/XHUB_Method/README.md).
-- **[corpnewt](https://github.com/corpnewt)** for [SSDTTime](https://github.com/corpnewt/SSDTTime) (multi-stage decompilation design) and [USBMap](https://github.com/corpnewt/USBMap).
-- **[DhinakG](https://github.com/DhinakG)** for [USBToolBox](https://github.com/USBToolBox/tool).
-- **[Acidanthera](https://github.com/acidanthera)** for OpenCore and MaciASL binaries.
+### Step 5: Reboot and Verify
+1. Restart your computer.
+2. In macOS, plug a USB 2.0 and a USB 3.0 device into each port to ensure everything connects properly.
+3. Open **System Settings > Bluetooth** to verify Bluetooth connects and wakes normally.
 
 ---
 
-## License
+## 🔌 Port Types Cheat Sheet
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+When setting a port's type using the `t` command, use these keywords:
+
+| Keyword | Best Used For |
+| :--- | :--- |
+| `typea` | Standard USB 2.0 ports (black/white physical ports). |
+| `usb3-a` | SuperSpeed USB 3.0 ports (blue, red, or yellow physical ports). |
+| `internal` | **Mandatory for internal devices:** Bluetooth modules, laptop webcams, LED/AIO pump controllers. |
+| `typec-switch` | A Type-C port that uses the same internal pins whichever way you flip the cable. |
+| `typec-noswitch` | A Type-C port that registers as two different ports when flipped. |
+
+---
+
+## ❓ Frequently Asked Questions (FAQ)
+
+#### How do I drag and drop a folder into Terminal?
+Simply click and hold the folder in Finder, drag your mouse cursor into the Terminal window, and release. macOS will automatically paste the full path.
+
+#### What if I have multiple controllers listed?
+Modern desktop PCs often have one main chipset controller (usually named `XHC` or `XHC1`) and secondary add-in controllers (like ASMedia or Thunderbolt). The tool marks the main controller as **`[ACTIVE]`**. You typically only need to map the controller that controls your case and motherboard I/O ports.
+
+#### Can I undo changes to my OpenCore config?
+Yes! Every time the tool installs an SSDT to your `EFI/OC`, it creates a timestamped backup of your config (e.g., `config.plist.bak-20261029-234100`) right next to your original file.
+
+---
+
+## 👏 Credits & Acknowledgments
+
+- **[5T33Z0](https://github.com/5T33Z0)** for developing and documenting the [XHUB Method in OC-Little-Translated](https://github.com/5T33Z0/OC-Little-Translated).
+- **[samuelnotfound](https://github.com/samuelnotfound)** for the [SSDT_USB_Mapping guide](https://github.com/samuelnotfound/miscellaneous-hackintosh-guides).
+- **[corpnewt](https://github.com/corpnewt)** for SSDTTime decompilation logic and USBMap.
+- **[DhinakG](https://github.com/DhinakG)** for the USBToolBox framework.
+- **[Acidanthera](https://github.com/acidanthera)** for OpenCorePkg and MaciASL tools.

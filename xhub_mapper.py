@@ -45,14 +45,48 @@ DEFAULT_PLD_BUFFER = [
     "/* 0008 */  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00",
 ]
 
-INTERNAL_HINT = ("Built-in devices (Bluetooth, laptop webcam, card reader ...) sit on ports that must be "
-                 "set to type 'internal' (0xFF) to operate reliably.")
+INTERNAL_HINT = (
+    "Built-in devices (Bluetooth, laptop webcam, card reader ...) sit on ports that must be "
+    "set to type 'internal' (0xFF) to operate reliably."
+)
 
 IASL_URL_MACOS = "https://raw.githubusercontent.com/acidanthera/MaciASL/master/Dist/iasl-stable"
 
 
 class UserError(Exception):
     """Actionable error for end users."""
+
+
+# ---------------------------------------------------------------------------
+# String & Identifier Sanitization
+# ---------------------------------------------------------------------------
+
+def sanitize_comment(text: Any) -> str:
+    """Format arbitrary user/tool text into a safe, single-line ASL comment."""
+    if not text:
+        return ""
+    # Normalize line breaks and tabs into single spaces
+    s = re.sub(r"[\r\n\t]+", " ", str(text))
+    # Collapse multiple spaces and trim
+    s = re.sub(r" {2,}", " ", s).strip()
+    # Neutralize block comment terminators
+    return s.replace("*/", "* /")
+
+
+def sanitize_asl_name(raw_name: str, fallback_prefix: str = "HS", index: int = 1) -> str:
+    """Convert arbitrary port names into valid 4-character ASL identifiers."""
+    name = str(raw_name).strip()
+    m_port = re.match(r"^Port\s*(\d+)$", name, re.IGNORECASE)
+    if m_port:
+        num = int(m_port.group(1))
+        return f"{fallback_prefix}{num:02d}"
+
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "", name)
+    if not cleaned:
+        return f"{fallback_prefix}{index:02d}"
+
+    # Pad with underscores to 4 characters or truncate to 4
+    return (cleaned + "____")[:4]
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +98,8 @@ class LiveController:
     """Represents a physical XHCI controller discovered from macOS IORegistry."""
     name: str
     acpi_path: str
-    pci_address: int            # (device << 16) | function
-    pci_debug: str              # e.g. "00:14.0"
+    pci_address: int
+    pci_debug: str
     vendor_id: int
     device_id: int
     driver: str
@@ -92,11 +126,9 @@ def get_live_xhci_controllers() -> List[LiveController]:
 
     for dev in devices:
         # Check standard PCI Class Code for xHCI (Base: 0x0C, Sub: 0x03, ProgIF: 0x30)
-        # In IOReg plists, class-code is 4 bytes: <30 03 0c 00>
         cc_bytes = dev.get("class-code")
         if not isinstance(cc_bytes, bytes) or len(cc_bytes) < 3:
             continue
-        # Check if USB (0x0C, 0x03) and xHCI (0x30)
         if cc_bytes[2] != 0x0C or cc_bytes[1] != 0x03 or cc_bytes[0] != 0x30:
             continue
 
@@ -105,21 +137,16 @@ def get_live_xhci_controllers() -> List[LiveController]:
             continue
 
         acpi_path = parse_acpi_plane_path(raw_acpi)
-        
-        # Extract vendor and device IDs
         vid = int.from_bytes(dev.get("vendor-id", b"\x00\x00")[:2], "little")
         did = int.from_bytes(dev.get("device-id", b"\x00\x00")[:2], "little")
-
-        # Extract PCI BDF
         pcidebug = dev.get("pcidebug", "Unknown")
+
         pci_addr = 0
         assigned = dev.get("assigned-addresses")
         if isinstance(assigned, bytes) and len(assigned) >= 4:
-            # First 4 bytes contain bus/dev/fn configuration
             cfg = int.from_bytes(assigned[:4], "little")
             pci_addr = ((cfg >> 11) & 0x1F) << 16 | ((cfg >> 8) & 0x07)
 
-        # Identify driver attachment
         driver = "AppleUSBXHCI"
         for child in dev.get("IORegistryEntryChildren", []):
             c_name = child.get("IOClass", child.get("CFBundleIdentifier", ""))
@@ -230,7 +257,7 @@ DSDT_RE = re.compile(r'DefinitionBlock\s*\(\s*"[^"]*"\s*,\s*"DSDT"')
 
 
 def mask(src: str) -> str:
-    def repl(m):
+    def repl(m: re.Match) -> str:
         t = m.group(0)
         if t.startswith('"'):
             return '""'
@@ -800,7 +827,6 @@ def check_path(raw: str) -> Optional[Path]:
     test = raw.strip()
     if not test:
         return None
-    # macOS Terminal paste sanitization: remove quotes, trailing spaces, backslash escapes
     if (test.startswith('"') and test.endswith('"')) or (test.startswith("'") and test.endswith("'")):
         test = test[1:-1]
     test = test.replace("\\ ", " ").replace("\\(", "(").replace("\\)", ")")
@@ -1004,11 +1030,11 @@ def prepare(cfg: dict, emit_disabled: bool):
                     errors.append(f"{path}.{p.get('name')}: Missing _ADR.")
                 continue
             parsed.append({
-                "name": p.get("name", "PRT_"),
+                "name": sanitize_asl_name(p.get("name", "PRT_")),
                 "adr": to_int(p["adr"]),
                 "type": parse_type(p.get("type", "typea")),
                 "keep": bool(p.get("keep")),
-                "label": str(p.get("label", "")),
+                "label": sanitize_comment(p.get("label", "")),
                 "pld_lines": p.get("pld_lines"),
             })
 
@@ -1035,7 +1061,8 @@ def prepare(cfg: dict, emit_disabled: bool):
 
 
 def render_port(p: dict) -> List[str]:
-    label = f"  // {p['label']}" if p["label"] else ""
+    clean_label = sanitize_comment(p.get("label", ""))
+    label = f"  // {clean_label}" if clean_label else ""
     pld_lines = p.get("pld_lines") or DEFAULT_PLD_BUFFER
     lines = [
         f"        Device ({p['name']})",
@@ -1195,6 +1222,11 @@ def install_to_efi(aml: Path, oc_dir: Path, renames=()) -> None:
 def normalize_imported_data(doc: Any) -> dict:
     if isinstance(doc, dict) and "controllers" in doc and isinstance(doc["controllers"], list):
         if doc["controllers"] and "identifiers" not in doc["controllers"][0]:
+            # Sanitize labels and port names inside native files
+            for ctrl in doc["controllers"]:
+                for p in ctrl.get("ports", []):
+                    p["label"] = sanitize_comment(p.get("label", ""))
+                    p["name"] = sanitize_asl_name(p.get("name", "PRT_"))
             return doc
 
     # USBToolBox Schema
@@ -1206,20 +1238,28 @@ def normalize_imported_data(doc: Any) -> dict:
             acpi_raw = ident.get("acpi_path") or c.get("acpi_path") or f"\\_SB.PCI0.XHC{i}"
             acpi_path = norm_path(acpi_raw, "\\")
             ports = []
-            for p in c.get("ports", []):
+            for p_idx, p in enumerate(c.get("ports", []), 1):
                 idx = p.get("index")
                 raw_type = p.get("type", p.get("class", 0))
                 type_val = parse_type(raw_type) if raw_type is not None else 0
                 raw_name = str(p.get("name", f"P{idx}"))
                 m_num = re.search(r"\d+", raw_name)
-                num = int(m_num.group(0)) if m_num else (idx or 1)
+                num = int(m_num.group(0)) if m_num else (idx or p_idx)
                 is_ss = p.get("class") == 3 or type_val in (0x03, 0x0A) or "ss" in raw_name.lower()
-                safe_name = f"SS{num:02d}" if (is_ss and "Port" in raw_name) else (f"HS{num:02d}" if "Port" in raw_name else norm_seg(raw_name))
+                prefix = "SS" if is_ss else "HS"
+                safe_name = sanitize_asl_name(raw_name, fallback_prefix=prefix, index=num)
+
                 ports.append({
-                    "name": safe_name, "adr": hx(idx), "keep": bool(p.get("selected", True)),
-                    "type": TYPE_NAMES.get(type_val, type_val), "label": str(p.get("comment", "")),
-                    "orig_connectable": hx(0xFF if p.get("selected") else 0x00), "orig_type": hx(type_val),
-                    "upc_dynamic": False, "adr_note": "", "table": "USBToolBox",
+                    "name": safe_name,
+                    "adr": hx(idx),
+                    "keep": bool(p.get("selected", True)),
+                    "type": TYPE_NAMES.get(type_val, type_val),
+                    "label": sanitize_comment(p.get("comment", "")),
+                    "orig_connectable": hx(0xFF if p.get("selected") else 0x00),
+                    "orig_type": hx(type_val),
+                    "upc_dynamic": False,
+                    "adr_note": "",
+                    "table": "USBToolBox",
                 })
             ctrls.append({
                 "path": acpi_path, "hub": "RHUB", "new_hub": "XHUB",
@@ -1241,7 +1281,7 @@ def normalize_imported_data(doc: Any) -> dict:
             raw_ports = c_val.get("ports", {})
             items = raw_ports.items() if isinstance(raw_ports, dict) else [(str(i), x) for i, x in enumerate(raw_ports)]
             ports = []
-            for p_key, p_val in items:
+            for p_idx, (p_key, p_val) in enumerate(items, 1):
                 if not isinstance(p_val, dict):
                     continue
                 raw_addr = p_val.get("port", p_key)
@@ -1251,13 +1291,22 @@ def normalize_imported_data(doc: Any) -> dict:
                     addr = parse_num(raw_addr)
                 conn = p_val.get("UsbConnector", p_val.get("connector", 0))
                 type_val = parse_type(conn)
+
+                pname = p_val.get("name", p_key)
+                prefix = "SS" if type_val == 0x03 else "HS"
+                safe_name = sanitize_asl_name(pname, fallback_prefix=prefix, index=p_idx)
+
                 ports.append({
-                    "name": p_val.get("name", p_key), "adr": hx(addr),
-                    "keep": not bool(p_val.get("disabled", False)) and not p_key.startswith("#"),
+                    "name": safe_name,
+                    "adr": hx(addr),
+                    "keep": not bool(p_val.get("disabled", False)) and not str(p_key).startswith("#"),
                     "type": TYPE_NAMES.get(type_val, type_val),
-                    "label": str(p_val.get("comment", p_val.get("Comment", ""))),
-                    "orig_connectable": hx(0xFF), "orig_type": hx(type_val),
-                    "upc_dynamic": False, "adr_note": "", "table": "USBMap",
+                    "label": sanitize_comment(p_val.get("comment") or p_val.get("Comment") or ""),
+                    "orig_connectable": hx(0xFF),
+                    "orig_type": hx(type_val),
+                    "upc_dynamic": False,
+                    "adr_note": "",
+                    "table": "USBMap",
                 })
             ctrls.append({
                 "path": acpi_path, "hub": "RHUB", "new_hub": "XHUB",
@@ -1308,6 +1357,29 @@ class Session:
     darwin: str = "osi"
 
 
+def parse_selection(spec: str, ports: list) -> List[int]:
+    """Parse port selectors ('1,2,5-8 HS01') into 0-based index list."""
+    idx: Set[int] = set()
+    for tok in re.split(r"[,\s]+", spec.strip()):
+        if not tok:
+            continue
+        m = re.fullmatch(r"(\d+)-(\d+)", tok)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            for i in range(min(a, b), max(a, b) + 1):
+                if 1 <= i <= len(ports):
+                    idx.add(i - 1)
+        elif tok.isdigit():
+            i = int(tok)
+            if 1 <= i <= len(ports):
+                idx.add(i - 1)
+        else:
+            hit = [i for i, p in enumerate(ports) if p.get("name", "").strip().lower() == tok.lower()]
+            if hit:
+                idx.add(hit[0])
+    return sorted(idx)
+
+
 def print_controller_list(controllers: list) -> None:
     for n, c in enumerate(controllers, 1):
         ports = c["ports"]
@@ -1333,28 +1405,38 @@ def edit_controller(c: dict) -> None:
         for n, p in enumerate(ports, 1):
             print(f"  {n:>3}  {p['name']:<5} {str(p.get('adr') or '?'):<6} [{'x' if p['keep'] else ' '}]  "
                   f"{str(p['type']):<15} {oem_state(p):<4} {p.get('label', '')}")
-        print("\n  Commands: k <ports> (toggle), on/off <ports>, t <ports> <type>, a auto, d (done)")
+        print("\n  Commands:")
+        print("    k <ports>         Toggle selection (e.g. k 1,2 or k HS01)")
+        print("    on/off <ports>    Select / deselect ports")
+        print("    t <ports> <type>  Set type (typea, usb3-a, typec-switch, internal, etc.)")
+        print("    l <port> <text>   Assign description/label (e.g. l 1 Front USB3)")
+        print("    a auto            Infer missing _ADR numbers")
+        print("    d (done)          Save & return to controller list")
         line = grab("\n Command: ").strip()
         if not line:
             continue
         parts = line.split(None, 1)
-        verb, rest = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
+        verb = parts[0].lower()
+        rest = parts[1] if len(parts) > 1 else ""
+
         if verb in ("d", "done"):
             return
         if verb in ("k", "on", "off"):
-            idx_list = [int(x) - 1 for x in re.split(r"[,\s]+", rest) if x.isdigit()]
-            for i in idx_list:
-                if 0 <= i < len(ports):
-                    ports[i]["keep"] = (not ports[i]["keep"]) if verb == "k" else (verb == "on")
+            for i in parse_selection(rest, ports):
+                ports[i]["keep"] = (not ports[i]["keep"]) if verb == "k" else (verb == "on")
         elif verb == "t":
             spec, _, tname = rest.rpartition(" ")
             try:
                 v = parse_type(tname)
-                for i in [int(x) - 1 for x in re.split(r"[,\s]+", spec) if x.isdigit()]:
-                    if 0 <= i < len(ports):
-                        ports[i]["type"] = TYPE_NAMES.get(v, v)
+                for i in parse_selection(spec, ports):
+                    ports[i]["type"] = TYPE_NAMES.get(v, v)
             except ValueError as e:
                 print(f"! {e}")
+        elif verb == "l":
+            spec, _, text = rest.partition(" ")
+            clean_text = sanitize_comment(text)
+            for i in parse_selection(spec, ports):
+                ports[i]["label"] = clean_text
         elif verb == "a" and rest.strip() == "auto":
             done = infer_adrs(ports)
             print("Inferred: " + ", ".join(done))
@@ -1447,21 +1529,122 @@ def interactive(iasl_path=None, auto_download=False) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI & Verification
+# CLI Command Implementations
 # ---------------------------------------------------------------------------
 
-def run_tests():
+def cmd_scan(args: argparse.Namespace) -> None:
+    iasl = Iasl(args.iasl, args.download_iasl)
+    paths = [Path(p) for p in args.paths] or parse_dropped(grab("Path: ").strip())
+    sources = load_acpi(paths, iasl)
+    controllers = scan_sources(sources, args.preselect)
+    if not controllers:
+        raise UserError("No RHUB/HUBN root hub found in ACPI tables.")
+    out_path = Path(args.output)
+    write_ports_json(out_path, controllers)
+    print(f"Scanned {len(controllers)} controller(s). Wrote configuration to {out_path}")
+
+
+def cmd_generate(args: argparse.Namespace) -> None:
+    cfg = read_ports_json(Path(args.config))
+    dsl = Path(args.output)
+    ctrls = build_ssdt(
+        cfg,
+        dsl,
+        oem_id=args.oem_id,
+        table_id=args.table_id,
+        emit_disabled=args.emit_disabled,
+        darwin=args.darwin_check,
+    )
+    if ctrls is None:
+        sys.exit(1)
+
+    if args.compile or args.efi:
+        iasl = Iasl(args.iasl, args.download_iasl)
+        aml = compile_dsl(dsl, iasl)
+        if aml:
+            print(f"Successfully compiled {aml}")
+            if args.efi:
+                oc_dir = check_path(args.efi)
+                if not oc_dir or not oc_dir.is_dir():
+                    raise UserError(f"Target EFI directory '{args.efi}' does not exist.")
+                renames = [c["rename"] for c in ctrls if c.get("rename")]
+                install_to_efi(aml, oc_dir, renames)
+        else:
+            sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Verification Tests
+# ---------------------------------------------------------------------------
+
+def run_tests() -> None:
     print("Running verification suite...")
+
     # 1. ASL evaluation
     ctx = ({"SSPA": ["Return (0x10)"], "CALC": ["Return (Add (SSPA (), 0x02))"]}, {"BASE": 5})
     toks = tokenize("Add (BASE, CALC ())")
-    assert eval_tokens(toks, ctx) == {23}
-    # 2. Live IORegistry query verification on macOS
+    assert eval_tokens(toks, ctx) == {23}, "ASL math evaluation failed"
+
+    # 2. String sanitization tests
+    dirty_comment = "Front USB\r\nHub with multiple lines */ and special chars"
+    clean_c = sanitize_comment(dirty_comment)
+    assert "\n" not in clean_c and "\r" not in clean_c, "Failed to strip newlines from comment"
+    assert "*/" not in clean_c, "Failed to neutralize block comment terminator"
+
+    assert sanitize_asl_name("Port 1") == "HS01"
+    assert sanitize_asl_name("Port 17", fallback_prefix="SS") == "SS17"
+    assert sanitize_asl_name("Front USB 3.0") == "Fron"
+
+    # 3. JSON normalization with labels
+    test_usbmap = {
+        "XHC@14000000": {
+            "acpi_path": "\\_SB.PCI0.XHC",
+            "ports": {
+                "01000000": {
+                    "name": "HS01",
+                    "port": "01000000",
+                    "UsbConnector": 255,
+                    "comment": "Internal Bluetooth\nCard",
+                }
+            },
+        }
+    }
+    norm = normalize_imported_data(test_usbmap)
+    imported_label = norm["controllers"][0]["ports"][0]["label"]
+    assert "\n" not in imported_label, "Newline escaped improperly during JSON import"
+
+    # 4. SSDT Rendering test with label
+    test_cfg = {
+        "controllers": [
+            {
+                "path": "\\_SB.PCI0.XHC",
+                "hub": "RHUB",
+                "ports": [
+                    {
+                        "name": "HS01",
+                        "adr": "0x01",
+                        "type": "internal",
+                        "keep": True,
+                        "label": "Test Single-Line Label",
+                    }
+                ],
+            }
+        ]
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        dsl_file = Path(tmp) / "TestSSDT.dsl"
+        ctrls = build_ssdt(test_cfg, dsl_file)
+        assert ctrls is not None, "Failed to generate test SSDT"
+        content = dsl_file.read_text(encoding="utf-8")
+        assert "Name (_ADR, 0x01)  // Test Single-Line Label" in content
+
+    # 5. Live IORegistry query verification on macOS
     live = get_live_xhci_controllers()
     print(f"Live IORegistry detected {len(live)} XHCI controller(s) on this Mac.")
     for lc in live:
         print(f" - {lc.name} at {lc.acpi_path} (PCI: {lc.pci_debug}, Driver: {lc.driver})")
-    print("All tests passed.")
+
+    print("All unit and integration tests passed successfully.")
 
 
 def main():
@@ -1469,31 +1652,42 @@ def main():
     sub = ap.add_subparsers(dest="cmd")
 
     i = sub.add_parser("interactive", help="menu-driven mode (default)")
-    i.set_defaults(func=lambda a: interactive())
+    i.add_argument("--iasl", help="path to custom iasl")
+    i.add_argument("--download-iasl", action="store_true", help="auto-download iasl if missing")
+    i.set_defaults(func=lambda a: interactive(a.iasl, a.download_iasl))
 
     s = sub.add_parser("scan", help="scan ACPI tables and correlate with live IORegistry")
     s.add_argument("paths", nargs="*")
     s.add_argument("-o", "--output", default="ports.json")
     s.add_argument("--preselect", choices=["connectable", "all", "none"], default="connectable")
-    s.set_defaults(func=lambda a: write_ports_json(Path(a.output), scan_sources(load_acpi([Path(p) for p in a.paths], Iasl()), a.preselect)))
+    s.add_argument("--iasl", help="path to custom iasl")
+    s.add_argument("--download-iasl", action="store_true", help="auto-download iasl if missing")
+    s.set_defaults(func=cmd_scan)
 
     g = sub.add_parser("generate", help="generate SSDT-XHUB from port mapping file")
     g.add_argument("config", help="path to ports.json / usb.json / USB.plist")
     g.add_argument("-o", "--output", default="SSDT-XHUB.dsl")
-    g.add_argument("--compile", action="store_true")
-    g.add_argument("--efi", help="path to EFI/OC")
-    g.add_argument("--emit-disabled", action="store_true")
-    g.add_argument("--darwin-check", choices=["osi", "osdw"], default="osi")
-    g.set_defaults(func=lambda a: build_ssdt(read_ports_json(Path(a.config)), Path(a.output), emit_disabled=a.emit_disabled, darwin=a.darwin_check))
+    g.add_argument("--compile", action="store_true", help="compile DSL to AML with iasl")
+    g.add_argument("--efi", help="path to OpenCore EFI directory (installs AML & updates config.plist)")
+    g.add_argument("--emit-disabled", action="store_true", help="emit unselected ports with connectable=0")
+    g.add_argument("--darwin-check", choices=["osi", "osdw"], default="osi", help="Darwin conditional check method")
+    g.add_argument("--oem-id", default="OCLT")
+    g.add_argument("--table-id", default="XHUB")
+    g.add_argument("--iasl", help="path to custom iasl")
+    g.add_argument("--download-iasl", action="store_true", help="auto-download iasl if missing")
+    g.set_defaults(func=cmd_generate)
 
     t = sub.add_parser("test", help="run tests and query live IORegistry")
     t.set_defaults(func=lambda a: run_tests())
 
     args = ap.parse_args()
-    if args.cmd is None:
-        interactive()
-    else:
-        args.func(args)
+    try:
+        if args.cmd is None:
+            interactive()
+        else:
+            args.func(args)
+    except UserError as e:
+        sys.exit(f"ERROR: {e}")
 
 
 if __name__ == "__main__":
