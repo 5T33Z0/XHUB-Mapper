@@ -152,8 +152,7 @@ Yes! Every time the tool installs an SSDT to your `EFI/OC`, it creates a timesta
 
 ## 👏 Credits & Acknowledgments
 
-- **[5T33Z0](https://github.com/5T33Z0)** for developing and documenting the [XHUB Method in OC-Little-Translated](https://github.com/5T33Z0/OC-Little-Translated).
-- **[samuelnotfound](https://github.com/samuelnotfound)** for the [SSDT_USB_Mapping guide](https://github.com/samuelnotfound/miscellaneous-hackintosh-guides).
+- **[samuelnotfound](https://github.com/samuelnotfound)** for the [XHUB Method](https://github.com/samuelnotfound/miscellaneous-hackintosh-guides).
 - **[corpnewt](https://github.com/corpnewt)** for SSDTTime decompilation logic and USBMap.
 - **[DhinakG](https://github.com/DhinakG)** for the USBToolBox framework.
 - **[Acidanthera](https://github.com/acidanthera)** for OpenCorePkg and MaciASL tools.
