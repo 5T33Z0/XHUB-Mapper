@@ -14,7 +14,7 @@ If your motherboard exceeds 15 ports and you don't configure which ones to keep,
 ### What is the XHUB Method?
 Most guides recommend injecting custom `.kext` files (like `USBMap.kext` or `USBToolBox.kext`). While these work, they can break during major macOS updates.
 
-The **XHUB Method** (developed by 5T33Z0 and samuelnotfound) maps your ports directly into your motherboard's firmware tables (**ACPI**):
+The **XHUB Method** (developed by samuelnotfound) maps your ports directly into your motherboard's firmware tables (**ACPI**):
 - **100% Kext-less:** Works purely through a tiny SSDT file (`SSDT-XHUB.aml`).
 - **Update-Proof:** Survives macOS updates, major version upgrades, and OS reinstalls.
 - **Dual-Boot Safe:** It disables the stock USB hub **only when macOS boots**. Windows and Linux continue using all ports normally.
@@ -137,10 +137,83 @@ When setting a port's type using the `t` command, use these keywords:
 
 ---
 
+## 🛠️ Troubleshooting
+
+### 1. Ports or `_ADR` show a `?`
+- **Why it happens:** Some motherboards don't write port addresses as plain numbers; they compute them at boot time with code methods, or define the ports in secondary SSDT tables instead of the main DSDT.
+- **How to fix:**
+  1. Make sure you load your **entire ACPI folder** (e.g. `SysReport/ACPI`), not just `DSDT.aml`. Many Intel boards define the controller in DSDT but define the actual ports in tables named `SSDT-xh_...aml`.
+  2. In the port editor, run the automatic address guessing command:
+     ```text
+     a auto
+     ```
+     This automatically fills in the missing addresses following standard Intel layout conventions (`HS01 = 0x01`, `SS01 = 0x11`, etc.).
+  3. You can also assign the address manually if you know it from IORegistry:
+     ```text
+     a 1 0x01
+     ```
+
+---
+
+### 2. Conflicting USB Kexts (Ports Still Unmapped After Reboot)
+- **Why it happens:** If you previously used kext-based USB mapping, those kexts will override your new SSDT.
+- **How to fix:**
+  1. Open your `config.plist` in an editor (like ProperTree or OpenCore Auxiliary Tools).
+  2. Under `Kernel -> Add`, **disable or remove** old mapping kexts:
+     - `USBPorts.kext`
+     - `USBMap.kext`
+     - `UTBMap.kext` and `USBToolBox.kext`
+     - `USBInjectAll.kext`
+  3. Under `Kernel -> Quirks`, ensure `XhciPortLimit` is set to `False` (this quirk is broken on macOS 11.3+ anyway).
+  4. Save and reboot.
+
+---
+
+### 3. Bluetooth or Webcam Disconnects During Sleep
+- **Why it happens:** macOS expects built-in devices to stay powered during sleep states. If the port is marked as external (`typea`), macOS cuts power to it when entering sleep.
+- **How to fix:** 
+  In the port editor, identify which port powers your Bluetooth module or webcam (look for the `<- OEM Bluetooth port (DBPN)` hint in the editor) and change its type to `internal`:
+  ```text
+  t <port_number> internal
+  ```
+  Then re-generate the SSDT (`Option 3`).
+
+---
+
+### 4. Controller Rename Not Applied (`XHC1` Collision)
+- **Why it happens:** If your motherboard's USB controller is named `XHC1`, macOS's built-in Apple USB drivers might attach their own default port map and ignore your SSDT.
+- **How to fix:**
+  When installing through the tool, `xhub_mapper` creates an ACPI patch (`XHC1` to `SHCI`).
+  - Open `config.plist` and look under `ACPI -> Patch`.
+  - Ensure the patch `XHC1 to SHCI` has `Enabled = True`.
+
+---
+
+### 5. "Selected: X/15 !! OVER LIMIT !!" Warning
+- **Why it happens:** macOS enforces a strict limit of 15 ports per controller. If you keep 16 or more, macOS will discard the extra ports or fail to boot cleanly.
+- **How to fix:**
+  In the port editor, use `k <number>` to turn off ports you do not need (for example, internal headers you don't plug cables into, or USB 2.0 personalities on ports where you only care about USB 3.0 speeds).
+
+---
+
+### 6. Error: "No RHUB/HUBN device found in the loaded tables"
+- **Why it happens:** The tables you dropped into the tool do not contain a recognized root hub.
+- **How to fix:**
+  - Make sure your system's **DSDT** is included in the folder you provided.
+  - If you dropped single files, select your whole `ACPI` dump folder instead.
+
+---
+
 ## ❓ Frequently Asked Questions (FAQ)
 
+#### What should I do if ports display a "?" instead of a valid name or address?
+If a port shows `?` under the `_ADR` or `Port` column:
+1. Make sure you drag the **entire ACPI folder** (including all SSDTs) into the tool.
+2. In the port editor, type `a auto` and press **Enter** to let the tool calculate standard addresses automatically.
+3. You can also assign the address manually using `a <port_number> <address>` (e.g. `a 1 0x01`).
+
 #### How do I drag and drop a folder into Terminal?
-Simply click and hold the folder in Finder, drag your mouse cursor into the Terminal window, and release. macOS will automatically paste the full path.
+Click and hold the folder in Finder, drag your cursor into the Terminal window, and release. macOS will automatically type out the complete path for you.
 
 #### What if I have multiple controllers listed?
 Modern desktop PCs often have one main chipset controller (usually named `XHC` or `XHC1`) and secondary add-in controllers (like ASMedia or Thunderbolt). The tool marks the main controller as **`[ACTIVE]`**. You typically only need to map the controller that controls your case and motherboard I/O ports.
