@@ -25,6 +25,34 @@ The **XHUB Method** (developed by samuelnotfound) maps your ports directly into 
 2. **Accepts Multiple Formats:** Works with your dumped ACPI tables (DSDT/SSDT) or pre-made dumps from popular tools like **USBToolBox** (`usb.json`) and **USBMap** (`USB.plist` / `USB.json`).
 3. **One-Click Installation:** Builds the SSDT, compiles it, places it into your `EFI/OC/ACPI` folder, and automatically enables it in your OpenCore `config.plist`.
 
+### How It Works
+
+```
+┌─────────────────────────────────┐       ┌─────────────────────────────────┐
+│     Live macOS IORegistry       │       │    ACPI Tables (DSDT / SSDTs)   │
+│  - Active PCI BDF & class-code  │       │  - Full port list (HSxx/SSxx)   │
+│  - Exact acpi-path correlation  │       │  - Native _ADR, _UPC, and _PLD  │
+└────────────────┬────────────────┘       └────────────────┬────────────────┘
+                 │                                         │
+                 └───────────────────┬─────────────────────┘
+                                     │
+                                     ▼
+                      ┌─────────────────────────────┐
+                      │    XHUB Mapper Controller   │
+                      │  - Filters ghost hubs       │
+                      │  - Validates 15-port limit  │
+                      │  - Normalizes port types    │
+                      └──────────────┬──────────────┘
+                                     │
+                                     ▼
+                      ┌─────────────────────────────┐
+                      │    SSDT-XHUB.dsl / .aml     │
+                      │  - Disables OEM RHUB (_STA) │
+                      │  - Injects XHUB under macOS │
+                      │  - Installs to OpenCore EFI │
+                      └─────────────────────────────┘
+```
+
 ---
 
 ## 📋 Prerequisites
@@ -123,17 +151,18 @@ You have two easy ways to feed your ports into the tool:
 
 ---
 
-## 🔌 Port Types Cheat Sheet
+## 🔌 ACPI Connector Types (`_UPC`)
 
-When setting a port's type using the `t` command, use these keywords:
+When setting a port's type using the `t` command, use these type names:
 
-| Keyword | Best Used For |
-| :--- | :--- |
-| `typea` | Standard USB 2.0 ports (black/white physical ports). |
-| `usb3-a` | SuperSpeed USB 3.0 ports (blue, red, or yellow physical ports). |
-| `internal` | **Mandatory for internal devices:** Bluetooth modules, laptop webcams, LED/AIO pump controllers. |
-| `typec-switch` | A Type-C port that uses the same internal pins whichever way you flip the cable. |
-| `typec-noswitch` | A Type-C port that registers as two different ports when flipped. |
+| Type Name | Byte Value | Description |
+| :--- | :---: | :--- |
+| `typea` | `0x00` | Standard USB 2.0 Type-A connector |
+| `usb3-a` | `0x03` | Standard USB 3.0 Type-A connector (SuperSpeed companion) |
+| `internal` | `0xFF` |  **Mandatory for internal devices:** Bluetooth modules, laptop webcams, LED/AIO pump controllers. |
+| `typec-hs`| `0x08` | Type-C connector operating strictly in USB 2.0 mode |
+| `typec-switch` | `0x09` | Type-C with internal hardware switch (same personality on flip) |
+| `typec-noswitch` | `0x0A` | Type-C without hardware switch (two distinct personalities on flip) |
 
 ---
 
