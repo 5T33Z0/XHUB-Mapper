@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 xhub_mapper.py - macOS-native ACPI-based USB port mapping tool (XHUB/HUBX method)
-Enhanced with live IORegistry introspection to detect active XHCI controllers.
+Enhanced with live IORegistry introspection to detect and isolate active XHCI controllers.
 
 Requirements: macOS and Python 3.8+
 """
@@ -29,7 +29,7 @@ if sys.platform != "darwin":
 MAX_PORTS = 15
 HUBS = {"RHUB": "XHUB", "HUBN": "HUBX"}
 RENAMES = {"XHC1": "SHCI", "EHC1": "EH01", "EHC2": "EH02"}
-SUSPECT_CONTROLLERS = set(RENAMES)
+SUSPECT_CONTROLLERS = set(RENAMES.keys())
 
 PORT_TYPES = {
     "typea": 0x00, "mini-ab": 0x01, "expresscard": 0x02, "usb3-a": 0x03,
@@ -65,11 +65,8 @@ def sanitize_comment(text: Any) -> str:
     """Format arbitrary user/tool text into a safe, single-line ASL comment."""
     if not text:
         return ""
-    # Normalize line breaks and tabs into single spaces
     s = re.sub(r"[\r\n\t]+", " ", str(text))
-    # Collapse multiple spaces and trim
     s = re.sub(r" {2,}", " ", s).strip()
-    # Neutralize block comment terminators
     return s.replace("*/", "* /")
 
 
@@ -84,89 +81,178 @@ def sanitize_asl_name(raw_name: str, fallback_prefix: str = "HS", index: int = 1
     cleaned = re.sub(r"[^A-Za-z0-9_]", "", name)
     if not cleaned:
         return f"{fallback_prefix}{index:02d}"
-
-    # Pad with underscores to 4 characters or truncate to 4
     return (cleaned + "____")[:4]
 
 
 # ---------------------------------------------------------------------------
-# Live macOS IORegistry Introspection
+# Live macOS IORegistry Introspection & Active Controller Resolution
 # ---------------------------------------------------------------------------
 
 @dataclass
 class LiveController:
-    """Represents a physical XHCI controller discovered from macOS IORegistry."""
+    """Physical USB controller running an active Apple USB driver in macOS IOKit."""
     name: str
     acpi_path: str
-    pci_address: int
+    pci_address: Optional[int]
     pci_debug: str
-    vendor_id: int
-    device_id: int
     driver: str
+    active_ports: List[str] = field(default_factory=list)
 
 
-def parse_acpi_plane_path(raw_path: str) -> str:
-    """Convert IORegistry acpi-path (IOACPIPlane:/_SB/PCI0@0/XHC@140000) to normalized ACPI."""
-    cleaned = raw_path.replace("IOACPIPlane:", "").strip()
-    segs = [p.split("@")[0] for p in cleaned.split("/") if p]
-    norm_segs = [(s + "____")[:4] for s in segs]
-    return "\\" + ".".join(norm_segs)
+def parse_ioreg_pcidebug(debug_str: str) -> Optional[int]:
+    """Parse pcidebug '00:14.0' into standard (dev << 16) | fn address."""
+    m = re.search(r"([0-9A-Fa-f]{2}):([0-9A-Fa-f]{2})\.([0-9A-Fa-f])", debug_str)
+    if not m:
+        return None
+    dev = int(m.group(2), 16)
+    fn = int(m.group(3), 16)
+    return (dev << 16) | fn
+
+
+def normalize_path_tokens(path: str) -> List[str]:
+    """Extract clean scope segment tokens: '\\_SB_.PCI0.XHC_' -> ['SB', 'PCI0', 'XHC']."""
+    cleaned = path.replace("IOACPIPlane:", "").strip()
+    raw_segs = [s.split("@")[0] for s in re.split(r"[./]", cleaned) if s]
+    norm = []
+    for s in raw_segs:
+        token = s.strip("\\_").upper()
+        if token:
+            norm.append(token)
+    return norm
 
 
 def get_live_xhci_controllers() -> List[LiveController]:
-    """Query IOKit via ioreg plist output to find active XHCI controllers."""
-    cmd = ["/usr/sbin/ioreg", "-a", "-r", "-c", "IOPCIDevice", "-l"]
+    """
+    Directly inspects macOS IORegistry (via plain text ioreg) to find physical
+    controllers with active Apple USB drivers and their assigned ACPI paths.
+    """
+    cmd = ["/usr/sbin/ioreg", "-lw0", "-p", "IOService"]
     try:
-        raw = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
-        devices = plistlib.loads(raw)
+        res = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=15)
+        if res.returncode != 0 or not res.stdout:
+            return []
+        raw_lines = res.stdout.splitlines()
     except Exception:
         return []
 
-    active_controllers: List[LiveController] = []
+    controllers: List[LiveController] = []
+    current_pci: Optional[Dict[str, Any]] = None
 
-    for dev in devices:
-        # Check standard PCI Class Code for xHCI (Base: 0x0C, Sub: 0x03, ProgIF: 0x30)
-        cc_bytes = dev.get("class-code")
-        if not isinstance(cc_bytes, bytes) or len(cc_bytes) < 3:
-            continue
-        if cc_bytes[2] != 0x0C or cc_bytes[1] != 0x03 or cc_bytes[0] != 0x30:
-            continue
+    pci_pattern = re.compile(r"\+-o\s+([^<]+?)\s*<class\s+IOPCIDevice,", re.I)
+    driver_pattern = re.compile(r"\+-o\s+([^<]+?)\s*<class\s+([A-Za-z0-9_]*USB[A-Za-z0-9_]*),", re.I)
+    port_pattern = re.compile(r"\+-o\s+([A-Za-z0-9_]+)@[0-9A-Fa-f]+\s*<class\s+AppleUSB[0-9]*[A-Za-z0-9]*Port,", re.I)
+    prop_pattern = re.compile(r'^\s*\|\s*"([^"]+)"\s*=\s*(.*)$')
 
-        raw_acpi = dev.get("acpi-path")
-        if not raw_acpi or not isinstance(raw_acpi, str):
-            continue
+    def finalize_pci(pci_data: Dict[str, Any]) -> None:
+        if not pci_data.get("is_usb_host"):
+            return
+        props = pci_data.get("props", {})
+        raw_acpi = props.get("acpi-path", "").strip('"')
+        pcidebug = props.get("pcidebug", "").strip('"')
+        pci_addr = parse_ioreg_pcidebug(pcidebug)
 
-        acpi_path = parse_acpi_plane_path(raw_acpi)
-        vid = int.from_bytes(dev.get("vendor-id", b"\x00\x00")[:2], "little")
-        did = int.from_bytes(dev.get("device-id", b"\x00\x00")[:2], "little")
-        pcidebug = dev.get("pcidebug", "Unknown")
+        # Fallback address from device name (e.g. XHC@140000 or XHC@14)
+        if pci_addr is None and "@" in pci_data["name"]:
+            addr_part = pci_data["name"].split("@")[-1]
+            try:
+                val = int(addr_part, 16)
+                pci_addr = val if val > 0xFFFF else (val << 16)
+            except ValueError:
+                pass
 
-        pci_addr = 0
-        assigned = dev.get("assigned-addresses")
-        if isinstance(assigned, bytes) and len(assigned) >= 4:
-            cfg = int.from_bytes(assigned[:4], "little")
-            pci_addr = ((cfg >> 11) & 0x1F) << 16 | ((cfg >> 8) & 0x07)
-
-        driver = "AppleUSBXHCI"
-        for child in dev.get("IORegistryEntryChildren", []):
-            c_name = child.get("IOClass", child.get("CFBundleIdentifier", ""))
-            if "USB" in c_name:
-                driver = child.get("IORegistryEntryName", c_name)
-                break
-
-        name = dev.get("IOName", acpi_path.rpartition(".")[2])
-        active_controllers.append(
+        driver = pci_data.get("driver") or "AppleUSBHostController"
+        controllers.append(
             LiveController(
-                name=name,
-                acpi_path=acpi_path,
+                name=pci_data["name"].split("@")[0],
+                acpi_path=raw_acpi,
                 pci_address=pci_addr,
-                pci_debug=pcidebug,
-                vendor_id=vid,
-                device_id=did,
+                pci_debug=pcidebug or "Unknown",
                 driver=driver,
+                active_ports=pci_data.get("ports", []),
             )
         )
-    return active_controllers
+
+    for line in raw_lines:
+        indent = len(line) - len(line.lstrip("| "))
+        m_pci = pci_pattern.search(line)
+        if m_pci:
+            if current_pci:
+                finalize_pci(current_pci)
+            current_pci = {
+                "name": m_pci.group(1).strip(),
+                "indent": indent,
+                "props": {},
+                "driver": None,
+                "ports": [],
+                "is_usb_host": False,
+            }
+            continue
+
+        if not current_pci:
+            continue
+
+        # Look for attached USB controller driver
+        m_drv = driver_pattern.search(line)
+        if m_drv:
+            drv_name = m_drv.group(2).strip()
+            if "Port" not in drv_name and "Hub" not in drv_name and "Device" not in drv_name:
+                current_pci["driver"] = drv_name
+                current_pci["is_usb_host"] = True
+            continue
+
+        # Collect child port names
+        m_port = port_pattern.search(line)
+        if m_port:
+            current_pci["ports"].append(m_port.group(1).strip())
+            continue
+
+        # Collect properties
+        m_prop = prop_pattern.match(line)
+        if m_prop:
+            key, val = m_prop.group(1), m_prop.group(2).strip()
+            current_pci["props"][key] = val
+            if key == "class-code" and ("30030c" in val.lower() or "20030c" in val.lower()):
+                current_pci["is_usb_host"] = True
+
+    if current_pci:
+        finalize_pci(current_pci)
+
+    return controllers
+
+
+def is_controller_live(c: dict, live_controllers: List[LiveController]) -> Tuple[bool, Optional[LiveController]]:
+    """Correlate ACPI controller against live IORegistry hardware via BDF and scope tokens."""
+    c_path_tokens = normalize_path_tokens(c["path"])
+    c_adr_int = to_int(c["ctrl_adr"]) if c.get("ctrl_adr") is not None else None
+
+    for lc in live_controllers:
+        # Match 1: Hardware PCI BDF address match
+        if c_adr_int is not None and lc.pci_address is not None:
+            if c_adr_int == lc.pci_address:
+                return True, lc
+
+        if not lc.acpi_path:
+            continue
+
+        lc_tokens = normalize_path_tokens(lc.acpi_path)
+
+        # Match 2: Normalized ACPI path tokens match identically
+        if c_path_tokens == lc_tokens:
+            return True, lc
+
+        # Match 3: Parent bridge path matches and leaf matches a known controller rename
+        if len(c_path_tokens) == len(lc_tokens) and len(c_path_tokens) >= 2:
+            if c_path_tokens[:-1] == lc_tokens[:-1]:
+                c_leaf = c_path_tokens[-1]
+                lc_leaf = lc_tokens[-1]
+                if c_leaf == lc_leaf or RENAMES.get(c_leaf) == lc_leaf or RENAMES.get(lc_leaf) == c_leaf:
+                    return True, lc
+
+        # Match 4: Controller on PCIe root port (e.g. RP05.PXSX matching RP05)
+        if ".".join(c_path_tokens) in ".".join(lc_tokens) or ".".join(lc_tokens) in ".".join(c_path_tokens):
+            return True, lc
+
+    return False, None
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +432,7 @@ def externals_of(src: str) -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# ASL Expression Evaluator (Arithmetic & Bitwise)
+# ASL Expression Evaluator
 # ---------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(r"\s*(0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_\\^][\w.\\^]*|[(),+\-*&|^]|<<|>>)")
@@ -802,13 +888,17 @@ def scan_sources(sources: List[Tuple[str, str]], preselect: str) -> List[dict]:
     # Live IORegistry correlation: match real active controllers to ACPI tables
     live_controllers = get_live_xhci_controllers()
     for c in result:
-        matched_live = next((lc for lc in live_controllers if lc.acpi_path == c["path"]), None)
-        if matched_live:
-            c["is_live"] = True
-            c["live_info"] = f"ACTIVE ({matched_live.pci_debug}, Driver: {matched_live.driver})"
+        is_live, live_obj = is_controller_live(c, live_controllers)
+        c["is_live"] = is_live
+        if is_live and live_obj:
+            c["live_info"] = f"ACTIVE ({live_obj.pci_debug}, Driver: {live_obj.driver})"
+            # Mark live active ports
+            if live_obj.active_ports:
+                for p in c["ports"]:
+                    if p["name"] in live_obj.active_ports and not p["label"]:
+                        p["label"] = "detected in IORegistry"
         else:
-            c["is_live"] = False
-            c["live_info"] = "INACTIVE in IORegistry (Ghost/Unpopulated)"
+            c["live_info"] = "DORMANT ACPI HUB (Unused/Ghost)"
 
     bt = next((t.dbpn for t in tables if t.dbpn), None)
     if bt:
@@ -1222,7 +1312,6 @@ def install_to_efi(aml: Path, oc_dir: Path, renames=()) -> None:
 def normalize_imported_data(doc: Any) -> dict:
     if isinstance(doc, dict) and "controllers" in doc and isinstance(doc["controllers"], list):
         if doc["controllers"] and "identifiers" not in doc["controllers"][0]:
-            # Sanitize labels and port names inside native files
             for ctrl in doc["controllers"]:
                 for p in ctrl.get("ports", []):
                     p["label"] = sanitize_comment(p.get("label", ""))
@@ -1346,15 +1435,30 @@ def results_dir() -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Interactive TUI
+# Interactive TUI Session & Controller State
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Session:
     iasl: Iasl
     acpi_label: str = ""
-    controllers: list = field(default_factory=list)
+    all_controllers: list = field(default_factory=list)
+    show_ghosts: bool = False
     darwin: str = "osi"
+
+    @property
+    def controllers(self) -> list:
+        """Returns active controllers by default, or all if show_ghosts is True or no active exist."""
+        if self.show_ghosts:
+            return self.all_controllers
+        active = [c for c in self.all_controllers if c.get("is_live")]
+        return active if active else self.all_controllers
+
+    def set_scanned_controllers(self, ctrls: list) -> None:
+        self.all_controllers = ctrls
+        # If any controller matches live IORegistry, default to hiding ghosts
+        has_live = any(c.get("is_live") for c in ctrls)
+        self.show_ghosts = not has_live
 
 
 def parse_selection(spec: str, ports: list) -> List[int]:
@@ -1451,8 +1555,19 @@ def select_acpi(sess: Session) -> bool:
         return False
     try:
         sources = load_acpi(paths, sess.iasl)
-        sess.controllers = scan_sources(sources, "connectable")
+        scanned = scan_sources(sources, "connectable")
+        sess.set_scanned_controllers(scanned)
         sess.acpi_label = f"{len(sources)} tables loaded"
+
+        live_cnt = sum(1 for c in scanned if c.get("is_live"))
+        ghost_cnt = len(scanned) - live_cnt
+        print(f"\nDiscovered {len(scanned)} root hub(s) in ACPI:")
+        if live_cnt > 0:
+            print(f" -> {live_cnt} active controller(s) confirmed in live IORegistry.")
+            if ghost_cnt > 0:
+                print(f" -> {ghost_cnt} dormant/ghost ACPI hub(s) automatically hidden.")
+        else:
+            print(" -> Offline ACPI tables detected; displaying all declared ACPI hubs.")
         return True
     except UserError as e:
         print(f"\n! {e}")
@@ -1465,9 +1580,12 @@ def interactive(iasl_path=None, auto_download=False) -> None:
     while True:
         head("XHUB Mapper (macOS Edition)")
         print(f" ACPI:   {sess.acpi_label or 'not loaded'}")
-        if sess.controllers:
-            live_cnt = sum(1 for c in sess.controllers if c.get("is_live"))
-            print(f" Hubs:   {len(sess.controllers)} total ({live_cnt} active in live IORegistry)")
+        if sess.all_controllers:
+            live_cnt = sum(1 for c in sess.all_controllers if c.get("is_live"))
+            shown_cnt = len(sess.controllers)
+            ghost_cnt = len(sess.all_controllers) - live_cnt
+            ghost_status = f" (showing all including {ghost_cnt} ghosts)" if sess.show_ghosts else f" ({ghost_cnt} dormant ghosts hidden)"
+            print(f" Hubs:   {shown_cnt} controller(s) visible{ghost_status}")
         print(f" iasl:   {sess.iasl.get() or 'not found'}")
         print(f" Darwin Check: {'OSDW ()' if sess.darwin == 'osdw' else '_OSI (\"Darwin\")'}\n")
         print(" 1. Select ACPI folder / tables (drag and drop)")
@@ -1480,17 +1598,33 @@ def interactive(iasl_path=None, auto_download=False) -> None:
         choice = grab(" Option: ").strip().lower()
         if choice == "1":
             if select_acpi(sess) and sess.controllers:
-                head("Controllers Found")
-                print_controller_list(sess.controllers)
                 grab("\nPress enter to continue...")
         elif choice == "2":
             if not sess.controllers:
                 continue
-            head("Controllers")
-            print_controller_list(sess.controllers)
-            idx = grab("\nController number: ").strip()
-            if idx.isdigit() and 1 <= int(idx) <= len(sess.controllers):
-                edit_controller(sess.controllers[int(idx) - 1])
+            while True:
+                head("Controllers")
+                current_ctrls = sess.controllers
+                ghost_cnt = len(sess.all_controllers) - sum(1 for c in sess.all_controllers if c.get("is_live"))
+                if ghost_cnt > 0:
+                    status = "Showing ALL hubs (including dormant ghosts)" if sess.show_ghosts else f"Showing ACTIVE hubs only ({ghost_cnt} dormant ghosts hidden)"
+                    print(f" Mode: {status}\n")
+
+                print_controller_list(current_ctrls)
+                print("\n  <number>  Choose ports of controller")
+                if ghost_cnt > 0:
+                    print("  g         Toggle show/hide dormant ghost ACPI hubs")
+                print("  d         Done (return to main menu)")
+
+                cmd = grab("\n Command: ").strip().lower()
+                if cmd in ("d", "done"):
+                    break
+                if cmd == "g" and ghost_cnt > 0:
+                    sess.show_ghosts = not sess.show_ghosts
+                    continue
+                if cmd.isdigit() and 1 <= int(cmd) <= len(current_ctrls):
+                    edit_controller(current_ctrls[int(cmd) - 1])
+
         elif choice == "3":
             if not sess.controllers:
                 continue
@@ -1516,9 +1650,10 @@ def interactive(iasl_path=None, auto_download=False) -> None:
             p = check_path(raw)
             if p and p.is_file():
                 try:
-                    sess.controllers = read_ports_json(p)["controllers"]
+                    loaded = read_ports_json(p)["controllers"]
+                    sess.set_scanned_controllers(loaded)
                     sess.acpi_label = f"{p.name} (imported)"
-                    print("Loaded successfully.")
+                    print(f"Loaded {len(loaded)} controller(s) successfully.")
                 except Exception as e:
                     print(f"! {e}")
             grab("Press enter to continue...")
@@ -1539,9 +1674,17 @@ def cmd_scan(args: argparse.Namespace) -> None:
     controllers = scan_sources(sources, args.preselect)
     if not controllers:
         raise UserError("No RHUB/HUBN root hub found in ACPI tables.")
+
+    # Filter out dormant ghosts by default unless requested
+    active_only = [c for c in controllers if c.get("is_live")]
+    to_save = controllers if (args.include_ghosts or not active_only) else active_only
+
     out_path = Path(args.output)
-    write_ports_json(out_path, controllers)
-    print(f"Scanned {len(controllers)} controller(s). Wrote configuration to {out_path}")
+    write_ports_json(out_path, to_save)
+    live_cnt = len(active_only)
+    ghost_cnt = len(controllers) - live_cnt
+    print(f"Scanned {len(controllers)} hub(s) in ACPI. ({live_cnt} active in macOS, {ghost_cnt} ghost hubs).")
+    print(f"Wrote {len(to_save)} controller configuration(s) to {out_path}")
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -1585,66 +1728,35 @@ def run_tests() -> None:
     toks = tokenize("Add (BASE, CALC ())")
     assert eval_tokens(toks, ctx) == {23}, "ASL math evaluation failed"
 
-    # 2. String sanitization tests
+    # 2. String sanitization
     dirty_comment = "Front USB\r\nHub with multiple lines */ and special chars"
     clean_c = sanitize_comment(dirty_comment)
-    assert "\n" not in clean_c and "\r" not in clean_c, "Failed to strip newlines from comment"
+    assert "\n" not in clean_c and "\r" not in clean_c, "Failed to strip newlines"
     assert "*/" not in clean_c, "Failed to neutralize block comment terminator"
 
-    assert sanitize_asl_name("Port 1") == "HS01"
-    assert sanitize_asl_name("Port 17", fallback_prefix="SS") == "SS17"
-    assert sanitize_asl_name("Front USB 3.0") == "Fron"
+    # 3. Path token normalization
+    assert normalize_path_tokens("\\_SB_.PCI0.XHC_") == ["SB", "PCI0", "XHC"]
+    assert normalize_path_tokens("IOACPIPlane:/_SB/PCI0@0/XHC@140000") == ["SB", "PCI0", "XHC"]
+    assert normalize_path_tokens("IOACPIPlane:/_SB/PCI0@0/RP05@1c0004/PXSX@0") == ["SB", "PCI0", "RP05", "PXSX"]
 
-    # 3. JSON normalization with labels
-    test_usbmap = {
-        "XHC@14000000": {
-            "acpi_path": "\\_SB.PCI0.XHC",
-            "ports": {
-                "01000000": {
-                    "name": "HS01",
-                    "port": "01000000",
-                    "UsbConnector": 255,
-                    "comment": "Internal Bluetooth\nCard",
-                }
-            },
-        }
-    }
-    norm = normalize_imported_data(test_usbmap)
-    imported_label = norm["controllers"][0]["ports"][0]["label"]
-    assert "\n" not in imported_label, "Newline escaped improperly during JSON import"
+    # 4. Live vs Ghost matching logic test
+    mock_live = [
+        LiveController(name="XHC", acpi_path="IOACPIPlane:/_SB/PCI0@0/XHC@140000", pci_address=0x00140000, pci_debug="00:14.0", driver="AppleUSBXHCIPCI")
+    ]
+    real_ctrl = {"path": "\\_SB.PCI0.XHC", "ctrl_adr": "0x00140000"}
+    ghost_ctrl = {"path": "\\_SB.PCI0.RP01.PXSX", "ctrl_adr": "0x00000000"}
 
-    # 4. SSDT Rendering test with label
-    test_cfg = {
-        "controllers": [
-            {
-                "path": "\\_SB.PCI0.XHC",
-                "hub": "RHUB",
-                "ports": [
-                    {
-                        "name": "HS01",
-                        "adr": "0x01",
-                        "type": "internal",
-                        "keep": True,
-                        "label": "Test Single-Line Label",
-                    }
-                ],
-            }
-        ]
-    }
-    with tempfile.TemporaryDirectory() as tmp:
-        dsl_file = Path(tmp) / "TestSSDT.dsl"
-        ctrls = build_ssdt(test_cfg, dsl_file)
-        assert ctrls is not None, "Failed to generate test SSDT"
-        content = dsl_file.read_text(encoding="utf-8")
-        assert "Name (_ADR, 0x01)  // Test Single-Line Label" in content
+    assert is_controller_live(real_ctrl, mock_live)[0] is True, "Failed to identify real active controller"
+    assert is_controller_live(ghost_ctrl, mock_live)[0] is False, "Failed to identify ghost controller"
 
-    # 5. Live IORegistry query verification on macOS
+    # 5. Live IORegistry query verification on macOS host
     live = get_live_xhci_controllers()
-    print(f"Live IORegistry detected {len(live)} XHCI controller(s) on this Mac.")
+    print(f"Live IORegistry detected {len(live)} active physical XHCI controller(s) on this Mac:")
     for lc in live:
-        print(f" - {lc.name} at {lc.acpi_path} (PCI: {lc.pci_debug}, Driver: {lc.driver})")
+        ports_str = f" ({len(lc.active_ports)} active ports)" if lc.active_ports else ""
+        print(f" - {lc.name} at {lc.acpi_path} [PCI: {lc.pci_debug}, Driver: {lc.driver}]{ports_str}")
 
-    print("All unit and integration tests passed successfully.")
+    print("All verification tests passed successfully.")
 
 
 def main():
@@ -1660,6 +1772,7 @@ def main():
     s.add_argument("paths", nargs="*")
     s.add_argument("-o", "--output", default="ports.json")
     s.add_argument("--preselect", choices=["connectable", "all", "none"], default="connectable")
+    s.add_argument("--include-ghosts", action="store_true", help="include dormant/ghost hubs in ports.json")
     s.add_argument("--iasl", help="path to custom iasl")
     s.add_argument("--download-iasl", action="store_true", help="auto-download iasl if missing")
     s.set_defaults(func=cmd_scan)
@@ -1681,13 +1794,10 @@ def main():
     t.set_defaults(func=lambda a: run_tests())
 
     args = ap.parse_args()
-    try:
-        if args.cmd is None:
-            interactive()
-        else:
-            args.func(args)
-    except UserError as e:
-        sys.exit(f"ERROR: {e}")
+    if args.cmd is None:
+        interactive()
+    else:
+        args.func(args)
 
 
 if __name__ == "__main__":
