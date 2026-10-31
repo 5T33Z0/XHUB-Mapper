@@ -76,33 +76,6 @@ flowchart LR
     style OUT fill:#161b22,stroke:#3fb950,color:#7ee787
 ```
 
-
-```
-┌─────────────────────────────────┐       ┌─────────────────────────────────┐
-│     Live macOS IORegistry       │       │    ACPI Tables (DSDT / SSDTs)   │
-│  - Active PCI BDF & class-code  │       │  - Full port list (HSxx/SSxx)   │
-│  - Exact acpi-path correlation  │       │  - Native _ADR, _UPC, and _PLD  │
-└────────────────┬────────────────┘       └────────────────┬────────────────┘
-                 │                                         │
-                 └───────────────────┬─────────────────────┘
-                                     │
-                                     ▼
-                      ┌─────────────────────────────┐
-                      │    XHUB Mapper Controller   │
-                      │  - Filters ghost hubs       │
-                      │  - Validates 15-port limit  │
-                      │  - Normalizes port types    │
-                      └──────────────┬──────────────┘
-                                     │
-                                     ▼
-                      ┌─────────────────────────────┐
-                      │    SSDT-XHUB.dsl / .aml     │
-                      │  - Disables OEM RHUB (_STA) │
-                      │  - Injects XHUB under macOS │
-                      │  - Installs to OpenCore EFI │
-                      └─────────────────────────────┘
-```
-
 ---
 
 ## 📋 Prerequisites
