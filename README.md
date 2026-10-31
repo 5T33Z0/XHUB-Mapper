@@ -59,7 +59,7 @@ The **XHUB Method** (developed by samuelnotfound) maps your ports directly into 
 
 Before using the tool, ensure you have:
 1. A Mac or running Hackintosh (macOS 10.15 Catalina or newer).
-2. [Python 3](https://www.python.org/) installed (comes pre-installed on macOS; if prompted to install Command Line Tools, click **Install**).
+2. [Python 3](https://www.python.org/) installed (Version 3.12 or later is required). 
 3. **Files:**
    - **Mandatory**: Your PC's ACPI tables (e.g. from an OpenCore `SysReport` folder or dumped via SSDTTime).
    - **Optional**: a discovery file from [USBToolBox](https://github.com/USBToolBox/tool) (`usb.json`) or [USBMap](https://github.com/corpnewt/USBMap) (`USB.plist`). Use the json export features of the mentioned tools.
