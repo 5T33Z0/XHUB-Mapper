@@ -7,6 +7,9 @@ Requirements: macOS and Python 3.8+
 """
 from __future__ import annotations
 
+__version__ = "3.0.1"
+__date__ = "2026-10-31"
+
 import argparse
 import json
 import os
@@ -122,10 +125,7 @@ def normalize_path_tokens(path: str) -> List[str]:
 
 
 def get_live_xhci_controllers() -> List[LiveController]:
-    """
-    Directly inspects macOS IORegistry (via plain text ioreg) to find physical
-    controllers with active Apple USB drivers and their assigned ACPI paths.
-    """
+    """Inspects macOS IORegistry via plain-text ioreg to find physical controllers."""
     cmd = ["/usr/sbin/ioreg", "-lw0", "-p", "IOService"]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=15)
@@ -151,7 +151,6 @@ def get_live_xhci_controllers() -> List[LiveController]:
         pcidebug = props.get("pcidebug", "").strip('"')
         pci_addr = parse_ioreg_pcidebug(pcidebug)
 
-        # Fallback address from device name (e.g. XHC@140000 or XHC@14)
         if pci_addr is None and "@" in pci_data["name"]:
             addr_part = pci_data["name"].split("@")[-1]
             try:
@@ -191,7 +190,6 @@ def get_live_xhci_controllers() -> List[LiveController]:
         if not current_pci:
             continue
 
-        # Look for attached USB controller driver
         m_drv = driver_pattern.search(line)
         if m_drv:
             drv_name = m_drv.group(2).strip()
@@ -200,13 +198,11 @@ def get_live_xhci_controllers() -> List[LiveController]:
                 current_pci["is_usb_host"] = True
             continue
 
-        # Collect child port names
         m_port = port_pattern.search(line)
         if m_port:
             current_pci["ports"].append(m_port.group(1).strip())
             continue
 
-        # Collect properties
         m_prop = prop_pattern.match(line)
         if m_prop:
             key, val = m_prop.group(1), m_prop.group(2).strip()
@@ -226,7 +222,6 @@ def is_controller_live(c: dict, live_controllers: List[LiveController]) -> Tuple
     c_adr_int = to_int(c["ctrl_adr"]) if c.get("ctrl_adr") is not None else None
 
     for lc in live_controllers:
-        # Match 1: Hardware PCI BDF address match
         if c_adr_int is not None and lc.pci_address is not None:
             if c_adr_int == lc.pci_address:
                 return True, lc
@@ -235,12 +230,9 @@ def is_controller_live(c: dict, live_controllers: List[LiveController]) -> Tuple
             continue
 
         lc_tokens = normalize_path_tokens(lc.acpi_path)
-
-        # Match 2: Normalized ACPI path tokens match identically
         if c_path_tokens == lc_tokens:
             return True, lc
 
-        # Match 3: Parent bridge path matches and leaf matches a known controller rename
         if len(c_path_tokens) == len(lc_tokens) and len(c_path_tokens) >= 2:
             if c_path_tokens[:-1] == lc_tokens[:-1]:
                 c_leaf = c_path_tokens[-1]
@@ -248,7 +240,6 @@ def is_controller_live(c: dict, live_controllers: List[LiveController]) -> Tuple
                 if c_leaf == lc_leaf or RENAMES.get(c_leaf) == lc_leaf or RENAMES.get(lc_leaf) == c_leaf:
                     return True, lc
 
-        # Match 4: Controller on PCIe root port (e.g. RP05.PXSX matching RP05)
         if ".".join(c_path_tokens) in ".".join(lc_tokens) or ".".join(lc_tokens) in ".".join(c_path_tokens):
             return True, lc
 
@@ -885,14 +876,13 @@ def scan_sources(sources: List[Tuple[str, str]], preselect: str) -> List[dict]:
 
     result = sorted(found.values(), key=lambda c: (-oem_on_count(c), c["path"]))
 
-    # Live IORegistry correlation: match real active controllers to ACPI tables
+    # Correlate real active controllers against live IORegistry
     live_controllers = get_live_xhci_controllers()
     for c in result:
         is_live, live_obj = is_controller_live(c, live_controllers)
         c["is_live"] = is_live
         if is_live and live_obj:
             c["live_info"] = f"ACTIVE ({live_obj.pci_debug}, Driver: {live_obj.driver})"
-            # Mark live active ports
             if live_obj.active_ports:
                 for p in c["ports"]:
                     if p["name"] in live_obj.active_ports and not p["label"]:
@@ -1306,10 +1296,221 @@ def install_to_efi(aml: Path, oc_dir: Path, renames=()) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Universal JSON Ingestion (Native, USBToolBox, USBMap)
+# Universal Port Map Ingestion & Accurate USBMap Matching Logic
 # ---------------------------------------------------------------------------
 
+def decode_usbmap_address(val: Any) -> Optional[int]:
+    """Decode a USBMap port address value (binary bytes, hex string, or int) to integer."""
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    if isinstance(val, bytes):
+        return int.from_bytes(val[:4], "little")
+    s = str(val).strip()
+    if re.fullmatch(r"[0-9A-Fa-f]{8}", s):
+        return int.from_bytes(bytes.fromhex(s), "little")
+    return parse_num(s)
+
+
+def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Parse USBMap configurations from both:
+      1. USBMap.kext/Contents/Info.plist (IOKitPersonalities dictionary)
+      2. USB.plist / USB.json (corpnewt discovery dictionary)
+    Correctly determines enabled vs disabled status and extracts address (_ADR).
+    """
+    controllers: List[Dict[str, Any]] = []
+
+    # Format 1: Info.plist / USBMap.plist with IOKitPersonalities
+    if "IOKitPersonalities" in doc and isinstance(doc["IOKitPersonalities"], dict):
+        for personality_key, personality in doc["IOKitPersonalities"].items():
+            if not isinstance(personality, dict):
+                continue
+            merge_props = personality.get("IOProviderMergeProperties", {})
+            raw_ports = merge_props.get("ports", {})
+            if not isinstance(raw_ports, dict):
+                continue
+
+            # Identify controller name from personality key or IONameMatch
+            ctrl_name = personality.get("IONameMatch") or personality_key.split("-")[-1]
+            ctrl_name = ctrl_name.split("@")[0].strip()
+
+            parsed_ports: List[Dict[str, Any]] = []
+            for p_key, p_val in raw_ports.items():
+                if not isinstance(p_val, dict):
+                    continue
+
+                # Detect enabled vs disabled port in IOKitPersonalities:
+                # Disabled ports use "#port" / "#usb-port-number" instead of "port" / "usb-port-number"
+                # or have a "#" prefix in their key name.
+                is_disabled = (
+                    str(p_key).startswith("#")
+                    or bool(p_val.get("disabled", False))
+                    or (p_val.get("enabled") is False)
+                    or ("#port" in p_val and "port" not in p_val)
+                    or ("#usb-port-number" in p_val and "usb-port-number" not in p_val)
+                )
+                is_enabled = not is_disabled and (
+                    p_val.get("enabled") is True
+                    or "port" in p_val
+                    or "usb-port-number" in p_val
+                    or ("enabled" not in p_val and "#port" not in p_val)
+                )
+
+                raw_addr = (
+                    p_val.get("port")
+                    or p_val.get("#port")
+                    or p_val.get("usb-port-number")
+                    or p_val.get("#usb-port-number")
+                    or p_key
+                )
+                address = decode_usbmap_address(raw_addr)
+                conn = p_val.get("UsbConnector", p_val.get("usb-port-type", p_val.get("connector", 0)))
+                type_val = parse_type(conn)
+                label = sanitize_comment(p_val.get("Comment") or p_val.get("comment") or "")
+
+                parsed_ports.append({
+                    "name": str(p_key).lstrip("#"),
+                    "address": address,
+                    "type": type_val,
+                    "label": label,
+                    "enabled": is_enabled,
+                })
+
+            if parsed_ports:
+                controllers.append({
+                    "name": ctrl_name,
+                    "acpi_path": None,
+                    "ports": parsed_ports,
+                })
+
+    # Format 2: USB.plist / discovery dictionary keyed by controller
+    elif isinstance(doc, dict):
+        for ctrl_key, c_val in doc.items():
+            if not isinstance(c_val, dict):
+                continue
+            raw_ports = c_val.get("ports", {})
+            if not isinstance(raw_ports, dict):
+                continue
+
+            ctrl_name = str(ctrl_key).split("@")[0].strip()
+            acpi_raw = c_val.get("acpi_path")
+
+            parsed_ports = []
+            for p_key, p_val in raw_ports.items():
+                if not isinstance(p_val, dict):
+                    continue
+
+                is_disabled = (
+                    str(p_key).startswith("#")
+                    or bool(p_val.get("disabled", False))
+                    or (p_val.get("enabled") is False)
+                    or ("#port" in p_val and "port" not in p_val)
+                )
+                is_enabled = not is_disabled and (
+                    p_val.get("enabled") is True
+                    or "port" in p_val
+                    or ("enabled" not in p_val and "#port" not in p_val)
+                )
+
+                raw_addr = (
+                    p_val.get("port")
+                    or p_val.get("#port")
+                    or p_val.get("usb-port-number")
+                    or p_key
+                )
+                address = decode_usbmap_address(raw_addr)
+                conn = p_val.get("UsbConnector", p_val.get("connector", 0))
+                type_val = parse_type(conn)
+                label = sanitize_comment(p_val.get("comment") or p_val.get("Comment") or "")
+
+                pname = p_val.get("name") or str(p_key).lstrip("#")
+                parsed_ports.append({
+                    "name": pname,
+                    "address": address,
+                    "type": type_val,
+                    "label": label,
+                    "enabled": is_enabled,
+                })
+
+            if parsed_ports:
+                controllers.append({
+                    "name": ctrl_name,
+                    "acpi_path": acpi_raw,
+                    "ports": parsed_ports,
+                })
+
+    return controllers
+
+
+def apply_usbmap_to_acpi_controllers(
+    acpi_controllers: List[Dict[str, Any]],
+    usbmap_controllers: List[Dict[str, Any]]
+) -> Tuple[int, int]:
+    """
+    Matches enabled USBMap entries against existing ACPI controllers/ports using _ADR.
+    Strictly restricted to supplementing:
+      - address (used to match corresponding ACPI port)
+      - Type (imported USB connector type)
+      - Label (imported port description/comment)
+    Preserves all ACPI port names, ACPI paths, original _ADR values, and _PLD buffers.
+    Only enabled USBMap entries are selected (keep=True); disabled ports receive keep=False.
+    """
+    total_acpi_ports = sum(len(c.get("ports", [])) for c in acpi_controllers)
+    matched_enabled_count = 0
+
+    for acpi_ctrl in acpi_controllers:
+        acpi_tokens = normalize_path_tokens(acpi_ctrl["path"])
+        acpi_leaf = acpi_tokens[-1] if acpi_tokens else ""
+
+        # Find corresponding USBMap controller
+        matched_usb_ctrl = None
+        for uc in usbmap_controllers:
+            if uc.get("acpi_path"):
+                if normalize_path_tokens(uc["acpi_path"]) == acpi_tokens:
+                    matched_usb_ctrl = uc
+                    break
+            uc_name = uc["name"].upper()
+            if uc_name == acpi_leaf or RENAMES.get(acpi_leaf) == uc_name or RENAMES.get(uc_name) == acpi_leaf:
+                matched_usb_ctrl = uc
+                break
+
+        # Fallback: single controller in both
+        if not matched_usb_ctrl and len(acpi_controllers) == 1 and len(usbmap_controllers) == 1:
+            matched_usb_ctrl = usbmap_controllers[0]
+
+        if not matched_usb_ctrl:
+            continue
+
+        # Map USBMap ports by decoded integer address (_ADR)
+        usbmap_by_adr: Dict[int, Dict[str, Any]] = {}
+        for up in matched_usb_ctrl["ports"]:
+            if up["address"] is not None:
+                usbmap_by_adr[up["address"]] = up
+
+        for ap in acpi_ctrl.get("ports", []):
+            adr_val = to_int(ap["adr"]) if ap.get("adr") is not None else None
+            if adr_val is not None and adr_val in usbmap_by_adr:
+                up = usbmap_by_adr[adr_val]
+                if up["enabled"]:
+                    ap["keep"] = True
+                    ap["type"] = TYPE_NAMES.get(up["type"], up["type"])
+                    if up["label"]:
+                        ap["label"] = up["label"]
+                    matched_enabled_count += 1
+                else:
+                    ap["keep"] = False
+                    if up["label"]:
+                        ap["label"] = up["label"]
+            else:
+                ap["keep"] = False
+
+    return matched_enabled_count, total_acpi_ports
+
+
 def normalize_imported_data(doc: Any) -> dict:
+    # Native ports.json
     if isinstance(doc, dict) and "controllers" in doc and isinstance(doc["controllers"], list):
         if doc["controllers"] and "identifiers" not in doc["controllers"][0]:
             for ctrl in doc["controllers"]:
@@ -1359,52 +1560,37 @@ def normalize_imported_data(doc: Any) -> dict:
             })
         return {"controllers": ctrls}
 
-    # USBMap Plist/JSON Schema
+    # USBMap Plist/JSON Schema (Standalone fallback)
     if isinstance(doc, dict):
-        ctrls = []
-        for ctrl_key, c_val in doc.items():
-            if not isinstance(c_val, dict):
-                continue
-            acpi_raw = c_val.get("acpi_path") or f"\\_SB.PCI0.{ctrl_key.split('@')[0]}"
-            acpi_path = norm_path(acpi_raw, "\\")
-            raw_ports = c_val.get("ports", {})
-            items = raw_ports.items() if isinstance(raw_ports, dict) else [(str(i), x) for i, x in enumerate(raw_ports)]
-            ports = []
-            for p_idx, (p_key, p_val) in enumerate(items, 1):
-                if not isinstance(p_val, dict):
-                    continue
-                raw_addr = p_val.get("port", p_key)
-                if isinstance(raw_addr, str) and len(raw_addr) == 8:
-                    addr = int.from_bytes(bytes.fromhex(raw_addr), "little")
-                else:
-                    addr = parse_num(raw_addr)
-                conn = p_val.get("UsbConnector", p_val.get("connector", 0))
-                type_val = parse_type(conn)
-
-                pname = p_val.get("name", p_key)
-                prefix = "SS" if type_val == 0x03 else "HS"
-                safe_name = sanitize_asl_name(pname, fallback_prefix=prefix, index=p_idx)
-
-                ports.append({
-                    "name": safe_name,
-                    "adr": hx(addr),
-                    "keep": not bool(p_val.get("disabled", False)) and not str(p_key).startswith("#"),
-                    "type": TYPE_NAMES.get(type_val, type_val),
-                    "label": sanitize_comment(p_val.get("comment") or p_val.get("Comment") or ""),
-                    "orig_connectable": hx(0xFF),
-                    "orig_type": hx(type_val),
-                    "upc_dynamic": False,
-                    "adr_note": "",
-                    "table": "USBMap",
+        usbmap_ctrls = parse_usbmap_controllers(doc)
+        if usbmap_ctrls:
+            ctrls = []
+            for i, uc in enumerate(usbmap_ctrls):
+                acpi_raw = uc.get("acpi_path") or f"\\_SB.PCI0.{uc['name']}"
+                acpi_path = norm_path(acpi_raw, "\\")
+                ports = []
+                for p_idx, up in enumerate(uc["ports"], 1):
+                    prefix = "SS" if up["type"] == 0x03 else "HS"
+                    safe_name = sanitize_asl_name(up["name"], fallback_prefix=prefix, index=p_idx)
+                    ports.append({
+                        "name": safe_name,
+                        "adr": hx(up["address"]),
+                        "keep": bool(up["enabled"]),
+                        "type": TYPE_NAMES.get(up["type"], up["type"]),
+                        "label": up["label"],
+                        "orig_connectable": hx(0xFF if up["enabled"] else 0x00),
+                        "orig_type": hx(up["type"]),
+                        "upc_dynamic": False,
+                        "adr_note": "",
+                        "table": "USBMap",
+                    })
+                ctrls.append({
+                    "path": acpi_path, "hub": "RHUB", "new_hub": "XHUB",
+                    "rename": RENAMES.get(acpi_path.rpartition(".")[2]), "in_dsdt": True,
+                    "conditional": False, "condition": "", "hub_adr": "0x00", "ctrl_adr": None,
+                    "hub_has_sta": False, "source": "USBMap", "referenced_by": [],
+                    "tables": ["USBMap"], "ports": ports,
                 })
-            ctrls.append({
-                "path": acpi_path, "hub": "RHUB", "new_hub": "XHUB",
-                "rename": RENAMES.get(acpi_path.rpartition(".")[2]), "in_dsdt": True,
-                "conditional": False, "condition": "", "hub_adr": "0x00", "ctrl_adr": None,
-                "hub_has_sta": False, "source": "USBMap", "referenced_by": [],
-                "tables": ["USBMap"], "ports": ports,
-            })
-        if ctrls:
             return {"controllers": ctrls}
 
     raise UserError("Unsupported port map format.")
@@ -1448,7 +1634,6 @@ class Session:
 
     @property
     def controllers(self) -> list:
-        """Returns active controllers by default, or all if show_ghosts is True or no active exist."""
         if self.show_ghosts:
             return self.all_controllers
         active = [c for c in self.all_controllers if c.get("is_live")]
@@ -1456,7 +1641,6 @@ class Session:
 
     def set_scanned_controllers(self, ctrls: list) -> None:
         self.all_controllers = ctrls
-        # If any controller matches live IORegistry, default to hiding ghosts
         has_live = any(c.get("is_live") for c in ctrls)
         self.show_ghosts = not has_live
 
@@ -1575,16 +1759,42 @@ def select_acpi(sess: Session) -> bool:
         return False
 
 
+def import_port_file(sess: Session, path: Path) -> None:
+    """Imports port map files (USBMap plist/json, USBToolBox json, or native ports.json)."""
+    raw_bytes = path.read_bytes()
+    try:
+        doc = json.loads(raw_bytes.decode("utf-8", errors="replace"))
+    except Exception:
+        doc = plistlib.loads(raw_bytes)
+
+    # Check if USBMap format
+    usbmap_ctrls = parse_usbmap_controllers(doc) if isinstance(doc, dict) else []
+
+    if usbmap_ctrls and sess.all_controllers:
+        matched, total = apply_usbmap_to_acpi_controllers(sess.all_controllers, usbmap_ctrls)
+        print(f"\nMatched and imported {matched} enabled port(s) across {total} ACPI port(s) using _ADR.")
+        print("Original ACPI port names, _ADR declarations, and paths were fully preserved.")
+        sess.acpi_label = f"{sess.acpi_label} + {path.name}"
+    else:
+        loaded = normalize_imported_data(doc)["controllers"]
+        sess.set_scanned_controllers(loaded)
+        sess.acpi_label = f"{path.name} (imported)"
+        print(f"\nLoaded {len(loaded)} controller(s) successfully.")
+
+
 def interactive(iasl_path=None, auto_download=False) -> None:
     sess = Session(iasl=Iasl(iasl_path, auto_download))
     while True:
-        head("XHUB Mapper (macOS Edition)")
+        head(f"XHUB Mapper v{__version__} (macOS Edition)")
         print(f" ACPI:   {sess.acpi_label or 'not loaded'}")
         if sess.all_controllers:
             live_cnt = sum(1 for c in sess.all_controllers if c.get("is_live"))
             shown_cnt = len(sess.controllers)
             ghost_cnt = len(sess.all_controllers) - live_cnt
-            ghost_status = f" (showing all including {ghost_cnt} ghosts)" if sess.show_ghosts else f" ({ghost_cnt} dormant ghosts hidden)"
+            ghost_status = (
+                f" (showing all including {ghost_cnt} ghosts)"
+                if sess.show_ghosts else f" ({ghost_cnt} dormant ghosts hidden)"
+            )
             print(f" Hubs:   {shown_cnt} controller(s) visible{ghost_status}")
         print(f" iasl:   {sess.iasl.get() or 'not found'}")
         print(f" Darwin Check: {'OSDW ()' if sess.darwin == 'osdw' else '_OSI (\"Darwin\")'}\n")
@@ -1592,7 +1802,7 @@ def interactive(iasl_path=None, auto_download=False) -> None:
         print(" 2. Choose controllers / ports")
         print(" 3. Generate SSDT-XHUB")
         print(" 4. Save ports.json")
-        print(" 5. Load ports.json (or USBToolBox / USBMap files)")
+        print(" 5. Load ports.json (or USBMap / USBToolBox files)")
         print(" 6. Toggle Darwin check (_OSI <-> OSDW)")
         print(" Q. Quit\n")
         choice = grab(" Option: ").strip().lower()
@@ -1607,7 +1817,10 @@ def interactive(iasl_path=None, auto_download=False) -> None:
                 current_ctrls = sess.controllers
                 ghost_cnt = len(sess.all_controllers) - sum(1 for c in sess.all_controllers if c.get("is_live"))
                 if ghost_cnt > 0:
-                    status = "Showing ALL hubs (including dormant ghosts)" if sess.show_ghosts else f"Showing ACTIVE hubs only ({ghost_cnt} dormant ghosts hidden)"
+                    status = (
+                        "Showing ALL hubs (including dormant ghosts)"
+                        if sess.show_ghosts else f"Showing ACTIVE hubs only ({ghost_cnt} dormant ghosts hidden)"
+                    )
                     print(f" Mode: {status}\n")
 
                 print_controller_list(current_ctrls)
@@ -1650,10 +1863,7 @@ def interactive(iasl_path=None, auto_download=False) -> None:
             p = check_path(raw)
             if p and p.is_file():
                 try:
-                    loaded = read_ports_json(p)["controllers"]
-                    sess.set_scanned_controllers(loaded)
-                    sess.acpi_label = f"{p.name} (imported)"
-                    print(f"Loaded {len(loaded)} controller(s) successfully.")
+                    import_port_file(sess, p)
                 except Exception as e:
                     print(f"! {e}")
             grab("Press enter to continue...")
@@ -1675,7 +1885,6 @@ def cmd_scan(args: argparse.Namespace) -> None:
     if not controllers:
         raise UserError("No RHUB/HUBN root hub found in ACPI tables.")
 
-    # Filter out dormant ghosts by default unless requested
     active_only = [c for c in controllers if c.get("is_live")]
     to_save = controllers if (args.include_ghosts or not active_only) else active_only
 
@@ -1739,17 +1948,130 @@ def run_tests() -> None:
     assert normalize_path_tokens("IOACPIPlane:/_SB/PCI0@0/XHC@140000") == ["SB", "PCI0", "XHC"]
     assert normalize_path_tokens("IOACPIPlane:/_SB/PCI0@0/RP05@1c0004/PXSX@0") == ["SB", "PCI0", "RP05", "PXSX"]
 
-    # 4. Live vs Ghost matching logic test
-    mock_live = [
-        LiveController(name="XHC", acpi_path="IOACPIPlane:/_SB/PCI0@0/XHC@140000", pci_address=0x00140000, pci_debug="00:14.0", driver="AppleUSBXHCIPCI")
+    # 4. USBMap Enabled vs Disabled Detection Test (kext Info.plist format)
+    usbmap_kext_doc = {
+        "IOKitPersonalities": {
+            "iMac19,1-XHC": {
+                "IOProviderMergeProperties": {
+                    "ports": {
+                        "HS01": {
+                            "port": b"\x01\x00\x00\x00",
+                            "UsbConnector": 0,
+                            "Comment": "Front USB 2.0 Enabled",
+                        },
+                        "HS02": {
+                            "#port": b"\x02\x00\x00\x00",
+                            "UsbConnector": 0,
+                            "Comment": "Disabled Port 2",
+                        },
+                        "SS01": {
+                            "port": b"\x11\x00\x00\x00",
+                            "UsbConnector": 3,
+                            "Comment": "Front USB 3.0 Enabled",
+                        },
+                        "#SS02": {
+                            "port": b"\x12\x00\x00\x00",
+                            "UsbConnector": 3,
+                            "Comment": "Disabled SS Port",
+                        },
+                    }
+                }
+            }
+        }
+    }
+    parsed_kext = parse_usbmap_controllers(usbmap_kext_doc)
+    assert len(parsed_kext) == 1, "Failed to parse USBMap kext personality"
+    k_ports = {p["address"]: p for p in parsed_kext[0]["ports"]}
+
+    assert k_ports[1]["enabled"] is True, "HS01 should be detected as enabled"
+    assert k_ports[2]["enabled"] is False, "HS02 (#port) should be detected as disabled"
+    assert k_ports[17]["enabled"] is True, "SS01 should be detected as enabled"
+    assert k_ports[18]["enabled"] is False, "#SS02 should be detected as disabled"
+    assert k_ports[1]["label"] == "Front USB 2.0 Enabled"
+
+    # 5. USBMap Enabled vs Disabled Detection Test (USB.plist discovery format)
+    usbmap_discovery_doc = {
+        "XHC@14000000": {
+            "acpi_path": "\\_SB.PCI0.XHC",
+            "ports": {
+                "01000000": {
+                    "name": "HS01",
+                    "port": "01000000",
+                    "connector": 0,
+                    "enabled": True,
+                    "comment": "Front Panel USB2",
+                },
+                "02000000": {
+                    "name": "HS02",
+                    "port": "02000000",
+                    "connector": 0,
+                    "enabled": False,
+                    "comment": "Unused USB2",
+                },
+            },
+        }
+    }
+    parsed_disc = parse_usbmap_controllers(usbmap_discovery_doc)
+    assert len(parsed_disc) == 1
+    d_ports = {p["address"]: p for p in parsed_disc[0]["ports"]}
+    assert d_ports[1]["enabled"] is True, "USB.plist port 1 should be enabled"
+    assert d_ports[2]["enabled"] is False, "USB.plist port 2 should be disabled"
+
+    # 6. Supplementing ACPI Tables via _ADR matching test
+    mock_acpi_controllers = [
+        {
+            "path": "\\_SB.PCI0.XHC",
+            "hub": "RHUB",
+            "ports": [
+                {"name": "POT1", "adr": "0x01", "keep": True, "type": "typea", "label": "Original", "pld_lines": ["/* pld */"]},
+                {"name": "POT2", "adr": "0x02", "keep": True, "type": "typea", "label": "Original", "pld_lines": None},
+                {"name": "POT3", "adr": "0x11", "keep": True, "type": "usb3-a", "label": "Original", "pld_lines": None},
+                {"name": "POT4", "adr": "0x12", "keep": True, "type": "usb3-a", "label": "Original", "pld_lines": None},
+            ],
+        }
     ]
-    real_ctrl = {"path": "\\_SB.PCI0.XHC", "ctrl_adr": "0x00140000"}
-    ghost_ctrl = {"path": "\\_SB.PCI0.RP01.PXSX", "ctrl_adr": "0x00000000"}
 
-    assert is_controller_live(real_ctrl, mock_live)[0] is True, "Failed to identify real active controller"
-    assert is_controller_live(ghost_ctrl, mock_live)[0] is False, "Failed to identify ghost controller"
+    matched_cnt, total_cnt = apply_usbmap_to_acpi_controllers(mock_acpi_controllers, parsed_kext)
+    assert matched_cnt == 2, f"Expected 2 enabled ports matched, got {matched_cnt}"
+    assert total_cnt == 4, f"Expected 4 total ACPI ports, got {total_cnt}"
 
-    # 5. Live IORegistry query verification on macOS host
+    acpi_p = {to_int(p["adr"]): p for p in mock_acpi_controllers[0]["ports"]}
+
+    # Verifications:
+    # Enabled ports are selected
+    assert acpi_p[1]["keep"] is True, "POT1 (_ADR 0x01) must be selected (enabled in USBMap)"
+    assert acpi_p[17]["keep"] is True, "POT3 (_ADR 0x11) must be selected (enabled in USBMap)"
+
+    # Disabled ports are unselected
+    assert acpi_p[2]["keep"] is False, "POT2 (_ADR 0x02) must be unselected (disabled in USBMap)"
+    assert acpi_p[18]["keep"] is False, "POT4 (_ADR 0x12) must be unselected (disabled in USBMap)"
+
+    # ACPI names, _ADR, paths, and _PLD are NOT overwritten
+    assert acpi_p[1]["name"] == "POT1", "ACPI port name 'POT1' must not be overwritten by USBMap 'HS01'"
+    assert acpi_p[1]["adr"] == "0x01", "ACPI _ADR must remain unchanged"
+    assert acpi_p[1]["pld_lines"] == ["/* pld */"], "ACPI _PLD buffer must remain preserved"
+    assert mock_acpi_controllers[0]["path"] == "\\_SB.PCI0.XHC", "ACPI path must remain unchanged"
+
+    # Type and Label are supplemented
+    assert acpi_p[1]["label"] == "Front USB 2.0 Enabled", "Label should be supplemented from USBMap"
+    assert acpi_p[17]["label"] == "Front USB 3.0 Enabled", "Label should be supplemented from USBMap"
+
+    # 7. SSDT Code Generation Verification with supplemented ACPI data
+    with tempfile.TemporaryDirectory() as tmp:
+        dsl_file = Path(tmp) / "TestSSDT.dsl"
+        ctrls = build_ssdt({"controllers": mock_acpi_controllers}, dsl_file)
+        assert ctrls is not None, "Failed to generate SSDT"
+        content = dsl_file.read_text(encoding="utf-8")
+
+        # Verify only enabled ports are emitted
+        assert "Device (POT1)" in content, "POT1 must be emitted in SSDT"
+        assert "Device (POT3)" in content, "POT3 must be emitted in SSDT"
+        assert "Device (POT2)" not in content, "Disabled POT2 must not be emitted"
+        assert "Device (POT4)" not in content, "Disabled POT4 must not be emitted"
+        assert "Name (_ADR, 0x01)  // Front USB 2.0 Enabled" in content
+        assert "Name (_ADR, 0x11)  // Front USB 3.0 Enabled" in content
+
+    # 8. Live IORegistry query verification on macOS host
     live = get_live_xhci_controllers()
     print(f"Live IORegistry detected {len(live)} active physical XHCI controller(s) on this Mac:")
     for lc in live:
