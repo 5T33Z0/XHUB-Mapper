@@ -28,6 +28,21 @@ The **XHUB Method** (developed by samuelnotfound) maps your ports directly into 
 ### How It Works
 
 ```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+    'darkMode': true,
+    'background': '#0d1117',
+    'primaryColor': '#161b22',
+    'primaryTextColor': '#e6edf3',
+    'primaryBorderColor': '#30363d',
+    'lineColor': '#8b949e',
+    'secondaryColor': '#161b22',
+    'tertiaryColor': '#21262d',
+    'clusterBkg': '#161b22',
+    'clusterBorder': '#30363d',
+    'titleColor': '#e6edf3',
+    'edgeLabelBackground': '#0d1117',
+    'fontFamily': 'Arial'
+}}}%%
 flowchart LR
     subgraph INPUT1["Live macOS IORegistry"]
         direction TB
@@ -54,7 +69,11 @@ flowchart LR
 
     RESULT --> OUT["Disable OEM RHUB (_STA)<br/>Inject XHUB under macOS<br/>Install to OpenCore EFI"]
 
-    style RESULT fill:#d5f5e3,stroke:#238636,stroke-width:2px
+    style INPUT1 fill:#161b22,stroke:#388bfd,color:#79c0ff
+    style INPUT2 fill:#161b22,stroke:#388bfd,color:#79c0ff
+    style PROCESS fill:#161b22,stroke:#a371f7,color:#d2a8ff
+    style RESULT fill:#0d2818,stroke:#3fb950,color:#7ee787,stroke-width:2px
+    style OUT fill:#161b22,stroke:#3fb950,color:#7ee787
 ```
 
 
