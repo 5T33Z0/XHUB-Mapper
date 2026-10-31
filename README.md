@@ -89,9 +89,12 @@ You have two easy ways to feed your ports into the tool:
 4. The tool will read your tables and cross-reference them with your live hardware to highlight your active controllers.
 
 #### Option B: Importing an existing dump from USBToolBox or USBMap
-*If you already mapped your ports on Windows using USBToolBox or on macOS using USBMap:*
-1. In the main menu, type `5` and hit **Enter**.
-2. **Drag and drop** your `usb.json` or `USB.plist` file into the Terminal window and hit **Enter**.
+1. In the main menu, type `1` and hit **Enter**.
+2. **Drag and drop** your ACPI folder (e.g. `SysReport/ACPI`) or your `DSDT.aml` / `.dsl` files directly into the Terminal window and hit **Enter**.
+3. If prompted to download `iasl` (the compiler), type `y` and press **Enter**.
+4. Return to the main menu.
+5. In the main menu, type `5` and hit **Enter**.
+6. **Drag and drop** your `usb.json` or `USB.plist` file into the Terminal window and hit **Enter**.
 
 ---
 
