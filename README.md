@@ -84,11 +84,10 @@ Before using the tool, ensure you have:
 1. A Mac or running Hackintosh (macOS 10.15 Catalina or newer).
 2. [Python 3](https://www.python.org/) installed (Version 3.12 or later is required). 
 3. Files:
+    - **Mandatory**: Your PC's ACPI tables (e.g. from an OpenCore `SysReport` folder or dumped using SSDTTime).
+    - **Optional**: A discovery file exported from [USBToolBox](https://github.com/USBToolBox/tool?utm_source=chatgpt.com) (`usb.json`) or [USBMap](https://github.com/corpnewt/USBMap?utm_source=chatgpt.com) (`USB.plist`). Use the respective JSON export features where available.
 
-    - Mandatory: Your PC's ACPI tables (e.g. from an OpenCore `SysReport` folder or dumped using SSDTTime).
-    - Optional: A discovery file exported from [USBToolBox](https://github.com/USBToolBox/tool?utm_source=chatgpt.com) (`usb.json`) or [USBMap](https://github.com/corpnewt/USBMap?utm_source=chatgpt.com) (`USB.plist`). Use the respective JSON export features where available.
-
-&#x20;  These optional files are useful if you want to migrate from kext-based to ACPI-based USB port mapping. They allow you to reuse your existing port mapping instead of having to map all ports from scratch.
+These optional files are useful if you want to migrate from kext-based to ACPI-based USB port mapping. They allow you to reuse your existing port mapping instead of having to map all ports from scratch.
 
 ---
 
