@@ -27,6 +27,34 @@ The **XHUB Method** (developed by samuelnotfound) maps your ports directly into 
 
 ### How It Works
 
+```mermaoid
+ishikawa-beta
+    SSDT-XHUB
+    Live macOS IORegistry
+        Active PCI BDF
+        PCI class-code
+        Exact ACPI-path correlation
+    ACPI Tables (DSDT / SSDTs)
+        Complete port list
+            HSxx ports
+            SSxx ports
+        Native ACPI properties
+            _ADR
+            _UPC
+            _PLD
+    XHUB Mapper
+        Ghost hub filtering
+        Port validation
+            15-port limit
+        Port type normalization
+    SSDT Generation
+        Disable OEM RHUB via _STA
+        Inject XHUB under macOS
+        Generate SSDT-XHUB.dsl
+        Compile SSDT-XHUB.aml
+        Install into OpenCore EFI
+```
+
 ```
 ┌─────────────────────────────────┐       ┌─────────────────────────────────┐
 │     Live macOS IORegistry       │       │    ACPI Tables (DSDT / SSDTs)   │
