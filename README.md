@@ -73,6 +73,7 @@ Before using the tool, ensure you have:
 2. Unzip the downloaded folder.
 3. Open the **Terminal** app on your Mac (press `Cmd + Space`, type `Terminal`, and hit Enter).
 4. Enter the following command to start teh script:
+
    ```bash
    Python3 ~/Downloads/XHUB-Mapper-main/xhub_mapper.py
    ```
