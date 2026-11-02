@@ -1342,21 +1342,15 @@ def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                     continue
 
                 # Detect enabled vs disabled port in IOKitPersonalities:
-                # Disabled ports use "#port" / "#usb-port-number" instead of "port" / "usb-port-number"
-                # or have a "#" prefix in their key name.
+                # Ports are enabled ONLY if "enabled" is explicitly True.
                 is_disabled = (
                     str(p_key).startswith("#")
                     or bool(p_val.get("disabled", False))
-                    or (p_val.get("enabled") is False)
+                    or p_val.get("enabled") is not True
                     or ("#port" in p_val and "port" not in p_val)
                     or ("#usb-port-number" in p_val and "usb-port-number" not in p_val)
                 )
-                is_enabled = not is_disabled and (
-                    p_val.get("enabled") is True
-                    or "port" in p_val
-                    or "usb-port-number" in p_val
-                    or ("enabled" not in p_val and "#port" not in p_val)
-                )
+                is_enabled = not is_disabled
 
                 raw_addr = (
                     p_val.get("port")
@@ -1405,14 +1399,11 @@ def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                 is_disabled = (
                     str(p_key).startswith("#")
                     or bool(p_val.get("disabled", False))
-                    or (p_val.get("enabled") is False)
+                    or p_val.get("enabled") is not True
                     or ("#port" in p_val and "port" not in p_val)
+                    or ("#usb-port-number" in p_val and "usb-port-number" not in p_val)
                 )
-                is_enabled = not is_disabled and (
-                    p_val.get("enabled") is True
-                    or "port" in p_val
-                    or ("enabled" not in p_val and "#port" not in p_val)
-                )
+                is_enabled = not is_disabled
 
                 raw_addr = (
                     p_val.get("port")
