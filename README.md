@@ -104,7 +104,7 @@ These optional files are useful if you want to migrate from kext-based to ACPI-b
 
 > [!NOTE]
 >
-> Alterntaively, you can enter `python3` press space bar and then drag and drop `xhub_mapper.py` into the Terminal and then press enter.
+> Alternatively, you can enter `python3` press space bar and then drag and drop `xhub_mapper.py` into the Terminal windo and press enter to run it.
 
 ---
 
