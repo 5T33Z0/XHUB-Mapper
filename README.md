@@ -97,14 +97,14 @@ These optional files are useful if you want to migrate from kext-based to ACPI-b
 1. Click the green **Code** button at the top of this repository and select **Download ZIP** (or clone the repository with Git).
 2. Unzip the downloaded folder.
 3. Open the **Terminal** app on your Mac (press `Cmd + Space`, type `Terminal`, and hit Enter).
-4. Enter the following command to start teh script:
-
+4. Enter the following command to run the script:<br><br>
    ```bash
    Python3 ~/Downloads/XHUB-Mapper-main/xhub_mapper.py
    ```
+
 > [!NOTE]
 >
-> Alterntaively, you can enter `python3` press space bar and then drag and drop `xhub_mapper.py` into the Terminal and then press enter.
+> Alternatively, you can enter `python3` press space bar and then drag and drop `xhub_mapper.py` into the Terminal windo and press enter to run it.
 
 ---
 
