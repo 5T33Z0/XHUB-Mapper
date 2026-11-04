@@ -111,21 +111,29 @@ These optional files are useful if you want to migrate from kext-based to ACPI-b
 ---
 
 ### Step 2: Load Your Ports
+
 You have two easy ways to feed your ports into the tool:
 
 #### Option A: Using your ACPI tables (Recommended for a clean start)
+
 1. In the main menu, type `1` and hit **Enter**.
 2. **Drag and drop** your ACPI folder (e.g. `SysReport/ACPI`) or your `DSDT.aml` / `.dsl` files directly into the Terminal window and hit **Enter**.
 3. If prompted to download `iasl` (the compiler), type `y` and press **Enter**.
 4. The tool will read your tables and cross-reference them with your live hardware to highlight your active controllers.
 
 #### Option B: Importing an existing dump from USBToolBox or USBMap
+
+> [!WARNING]
+>
+> **Importing ACPI tables is mandatory before importing any plist or JSON configuration from a USB kext!**
+>
+> Always import your ACPI tables first (see Option A) before loading any configuration file from a USB kext. The tool relies on the ACPI information to correctly identify USB port device declarations (HS/SS). Skipping this step results in incorrect or mismatched port declarations.
+
 1. In the main menu, type `1` and hit **Enter**.
 2. **Drag and drop** your ACPI folder (e.g. `SysReport/ACPI`) or your `DSDT.aml` / `.dsl` files directly into the Terminal window and hit **Enter**.
-3. If prompted to download `iasl` (the compiler), type `y` and press **Enter**.
-4. Return to the main menu.
-5. In the main menu, type `5` and hit **Enter**.
-6. **Drag and drop** your `usb.json` or `USB.plist` file into the Terminal window and hit **Enter**.
+3. Return to the main menu.
+4. In the main menu, type `5` and hit Enter.
+5. Drag and drop your exported configuration file from your USB kext into the Terminal window and hit Enter.
 
 ---
 
@@ -149,15 +157,21 @@ You have two easy ways to feed your ports into the tool:
 - **Finish editing:** Type `d` and press **Enter** to go back.
 
 > [!IMPORTANT]
+> 
 > **The 15-Port Rule:**
+> 
 > You can select a maximum of **15 ports** (`[x]`) per controller. If your count exceeds 15, uncheck ports you don't use until you are at or below 15.
 
 > [!CAUTION]
+> 
 > **Bluetooth & Webcams Must Be "Internal":**
+> 
 > If a port powers your motherboard's internal Bluetooth card or a laptop webcam, you **must** set its type to `internal`:
+> 
 > ```text
 > t 7 internal
 > ```
+> 
 > *(Replace `7` with the port number your Bluetooth is plugged into).* If this is not set to `internal`, Bluetooth will disconnect randomly or fail to wake from sleep!
 
 ---
