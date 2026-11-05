@@ -7,8 +7,8 @@ Requirements: macOS and Python 3.8+
 """
 from __future__ import annotations
 
-__version__ = "3.0.1"
-__date__ = "2026-10-31"
+__version__ = "3.0.2"
+__date__ = "2026-11-05"
 
 import argparse
 import json
@@ -1361,6 +1361,8 @@ def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                 )
                 address = decode_usbmap_address(raw_addr)
                 conn = p_val.get("UsbConnector", p_val.get("usb-port-type", p_val.get("connector", 0)))
+                if isinstance(p_val.get("type_override"), int):
+                    conn = p_val["type_override"]
                 type_val = parse_type(conn)
                 label = sanitize_comment(p_val.get("Comment") or p_val.get("comment") or "")
 
@@ -1413,6 +1415,8 @@ def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                 )
                 address = decode_usbmap_address(raw_addr)
                 conn = p_val.get("UsbConnector", p_val.get("connector", 0))
+                if isinstance(p_val.get("type_override"), int):
+                    conn = p_val["type_override"]
                 type_val = parse_type(conn)
                 label = sanitize_comment(p_val.get("comment") or p_val.get("Comment") or "")
 
