@@ -1,3 +1,10 @@
+[![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![macOS](https://img.shields.io/badge/macOS-10.15%2B-000000?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![License](https://img.shields.io/github/license/5T33Z0/XHUB-Mapper?style=for-the-badge)](LICENSE)
+[![ACPI](https://img.shields.io/badge/ACPI-SSDT-8A2BE2?style=for-the-badge)](https://github.com/5T33Z0/XHUB-Mapper)
+[![Kextless](https://img.shields.io/badge/Kext--less-100%25-2ea44f?style=for-the-badge)](https://github.com/5T33Z0/XHUB-Mapper)
+[![GitHub Stars](https://img.shields.io/github/stars/5T33Z0/XHUB-Mapper?style=for-the-badge&logo=github)](https://github.com/5T33Z0/XHUB-Mapper)
+
 # XHUB Mapper
 
 A beginner-friendly tool to map your Hackintosh USB ports cleanly via ACPI—no extra kexts required!
