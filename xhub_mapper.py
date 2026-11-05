@@ -7,7 +7,7 @@ Requirements: macOS and Python 3.8+
 """
 from __future__ import annotations
 
-__version__ = "3.0.2"
+__version__ = "3.0.3"
 __date__ = "2026-11-05"
 
 import argparse
@@ -1598,13 +1598,32 @@ def read_ports_json(path: Path) -> dict:
             doc = json.loads(raw.decode("utf-8", errors="replace"))
         except Exception:
             doc = plistlib.loads(raw)
-        return normalize_imported_data(doc)
+
+        doc = normalize_imported_data(doc)
+
+        for controller in doc.get("controllers", []):
+            source = Path(controller["source"])
+
+            if not source.is_absolute():
+                source = path.parent / source
+
+            controller["source"] = str(source.resolve())
+
+        return doc
+
     except Exception as e:
         raise UserError(f"Cannot read {path.name}: {e}")
 
 
 def write_ports_json(path: Path, controllers: list) -> None:
-    doc = {"controllers": controllers}
+    doc = {"controllers": []}
+
+    for controller in controllers:
+        entry = controller.copy()
+        source = Path(entry["source"])
+        entry["source"] = os.path.relpath(source, start=path.parent)
+        doc["controllers"].append(entry)
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
@@ -1855,9 +1874,16 @@ def interactive(iasl_path=None, auto_download=False) -> None:
             grab("Press enter to continue...")
         elif choice == "5":
             raw = grab("Drag port map JSON / plist here: ").strip()
-            p = check_path(raw)
+            paths = parse_dropped(raw)
+            #print(f"DEBUG: Parsed paths: {paths}")
+
+            p = paths[0] if len(paths) == 1 else None
+
+            #print(f"DEBUG: Selected path: {p}")
+            #print(f"DEBUG: Exists: {p.exists() if p else False}")
             if p and p.is_file():
                 try:
+                    #print("DEBUG: Calling import_port_file()")
                     import_port_file(sess, p)
                 except Exception as e:
                     print(f"! {e}")
@@ -1866,7 +1892,6 @@ def interactive(iasl_path=None, auto_download=False) -> None:
             sess.darwin = "osdw" if sess.darwin == "osi" else "osi"
         elif choice == "q":
             sys.exit(0)
-
 
 # ---------------------------------------------------------------------------
 # CLI Command Implementations
