@@ -7,7 +7,7 @@
 
 # XHUB Mapper
 
-A beginner-friendly tool to map your Hackintosh USB ports cleanly via ACPI—no extra kexts required!
+A beginner-friendly tool to map your Hackintosh USB ports cleanly via ACPI – no more USBMap kext required! Import-Fuctionality included!
 
 <img width="1170" height="742" alt="XHUBMapper_CLI" src="https://github.com/user-attachments/assets/5f9d9b6b-950a-4d1e-8b21-39a0f7cc59cc" />
 
