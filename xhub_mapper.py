@@ -7,8 +7,8 @@ Requirements: macOS and Python 3.8+
 """
 from __future__ import annotations
 
-__version__ = "3.0.3"
-__date__ = "2026-11-05"
+__version__ = "3.1.0"
+__date__ = "2026-11-06"
 
 import argparse
 import json
@@ -58,6 +58,116 @@ IASL_URL_MACOS = "https://raw.githubusercontent.com/acidanthera/MaciASL/master/D
 
 class UserError(Exception):
     """Actionable error for end users."""
+
+
+# ---------------------------------------------------------------------------
+# Terminal ANSI Color & Presentation Helpers (Safe for Python 3.8+)
+# ---------------------------------------------------------------------------
+
+def _supports_color(stream=sys.stdout) -> bool:
+    if not hasattr(stream, "isatty") or not stream.isatty():
+        return False
+    if os.environ.get("NO_COLOR") or os.environ.get("TERM") == "dumb":
+        return False
+    return True
+
+
+class C:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    CYAN = "\033[36m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_RED = "\033[91m"
+    BRIGHT_WHITE = "\033[97m"
+
+
+def _wrap(text: Any, *codes: str) -> str:
+    s = str(text)
+    if not _supports_color() or not codes:
+        return s
+    return "".join(codes) + s + C.RESET
+
+
+def c_bold(text: Any) -> str:
+    return _wrap(text, C.BOLD)
+
+
+def c_dim(text: Any) -> str:
+    return _wrap(text, C.DIM)
+
+
+def c_cyan(text: Any) -> str:
+    return _wrap(text, C.CYAN)
+
+
+def c_bright_cyan(text: Any) -> str:
+    return _wrap(text, C.BRIGHT_CYAN)
+
+
+def c_green(text: Any) -> str:
+    return _wrap(text, C.GREEN)
+
+
+def c_yellow(text: Any) -> str:
+    return _wrap(text, C.YELLOW)
+
+
+def c_red(text: Any) -> str:
+    return _wrap(text, C.RED)
+
+
+def c_bright_red(text: Any) -> str:
+    return _wrap(text, C.BRIGHT_RED)
+
+
+def c_blue(text: Any) -> str:
+    return _wrap(text, C.BLUE)
+
+
+def c_bright_white(text: Any) -> str:
+    return _wrap(text, C.BRIGHT_WHITE)
+
+
+def print_banner() -> None:
+    """Display modern, compact ASCII banner for XHUB Mapper."""
+    banner_lines = [
+        r"  __  ___  _ _  _ ___    __  __                            ",
+        r"  \ \/ / || | || | _ )  |  \/  |__ _ _ __ _ __  ___ _ _    ",
+        r"   >  <| __ | || | _ \  | |\/| / _` | '_ \ '_ \/ -_) '_|   ",
+        r"  /_/\_\_||_|\__/|___/  |_|  |_\__,_| .__/ .__/\___|_|     ",
+        r"                                    |_|  |_|               ",
+    ]
+    print()
+    for line in banner_lines:
+        xhub_part = line[:24]
+        mapper_part = line[24:]
+        print(c_bright_cyan(c_bold(xhub_part)) + c_cyan(mapper_part))
+    print(c_dim("       USB Port Mapping & SSDT Generator") + c_dim(f"  •  v{__version__}\n"))
+
+
+def print_success(msg: str) -> None:
+    print(" " + c_green("✔") + " " + str(msg))
+
+
+def print_warning(msg: str) -> None:
+    print(" " + c_yellow("⚠") + " " + c_yellow(str(msg)))
+
+
+def print_error(msg: str, file=None) -> None:
+    target = file or sys.stderr
+    prefix = c_red("✖") if _supports_color(target) else "✖"
+    body = c_bright_red(str(msg)) if _supports_color(target) else str(msg)
+    print(f" {prefix} {body}", file=target)
+
+
+def print_info(msg: str) -> None:
+    print(" " + c_cyan("➜") + " " + str(msg))
 
 
 # ---------------------------------------------------------------------------
@@ -939,9 +1049,10 @@ def grab(prompt: str) -> str:
 def head(title: str, width: int = 60) -> None:
     if sys.stdout.isatty():
         os.system("clear")
-    print(" " + "#" * width)
-    print(" #" + title.center(width - 2) + "#")
-    print(" " + "#" * width + "\n")
+    border = "#" * width
+    print(c_cyan(" " + border))
+    print(c_cyan(" #") + c_bold(title.center(width - 2)) + c_cyan("#"))
+    print(c_cyan(" " + border + "\n"))
 
 
 # ---------------------------------------------------------------------------
@@ -976,17 +1087,17 @@ def find_iasl(explicit=None) -> Optional[str]:
 def download_iasl() -> Optional[str]:
     dest = tools_dir() / "iasl"
     dest.parent.mkdir(exist_ok=True)
-    print(f"Downloading macOS iasl from {IASL_URL_MACOS} ...")
+    print_info(f"Downloading macOS iasl from {c_blue(str(IASL_URL_MACOS))} ...")
     try:
         req = urllib.request.Request(IASL_URL_MACOS, headers={"User-Agent": "Mozilla/5.0 (Macintosh)"})
         with urllib.request.urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
             shutil.copyfileobj(resp, f)
         dest.chmod(dest.stat().st_mode | 0o111)
         if find_iasl(str(dest)):
-            print(f"iasl ready at {dest}")
+            print_success(f"iasl ready at {c_blue(str(dest))}")
             return str(dest)
     except Exception as e:
-        print(f"! Download failed: {e}")
+        print_error(f"Download failed: {e}")
     return None
 
 
@@ -999,7 +1110,7 @@ class Iasl:
     def get(self) -> Optional[str]:
         if not self._path:
             self._path = find_iasl(self.explicit)
-        if not self._path and (self.auto or grab("\nDownload iasl into ./tools? [Y/n] ").strip().lower() in ("", "y")):
+        if not self._path and (self.auto or grab(f"\n{c_yellow('Download iasl into ./tools? [Y/n] ')}").strip().lower() in ("", "y")):
             self._path = download_iasl()
         return self._path
 
@@ -1078,7 +1189,7 @@ def load_acpi(paths: List[Path], iasl: Iasl) -> List[Tuple[str, str]]:
             raise UserError("Decompilation required, but no functional iasl found.")
         keep_dir = results_dir() / "decompiled"
         keep_dir.mkdir(exist_ok=True)
-        print(f"Decompiling with {iasl_path} ...")
+        print_info(f"Decompiling with {c_blue(str(iasl_path))} ...")
         with tempfile.TemporaryDirectory(prefix="xhub_") as tmp:
             converted, failed = decompile_amls(tables, iasl_path, Path(tmp))
             for f in converted:
@@ -1086,7 +1197,7 @@ def load_acpi(paths: List[Path], iasl: Iasl) -> List[Tuple[str, str]]:
                 shutil.copy2(f, dest)
                 dsls.append(dest)
         if failed:
-            print("! Could not decompile: " + ", ".join(failed))
+            print_warning("Could not decompile: " + ", ".join(failed))
 
     dsls.sort(key=lambda f: (0 if f.stem.upper().startswith("DSDT") else 1, natural_key(f)))
     return [(str(f), f.read_text(encoding="utf-8", errors="replace")) for f in dsls]
@@ -1230,14 +1341,14 @@ def render_ssdt(controllers: list, oem_id: str, table_id: str, darwin: str = "os
 def build_ssdt(cfg: dict, dsl: Path, oem_id="OCLT", table_id="XHUB", emit_disabled=False, darwin="osi"):
     controllers, errors, warnings = prepare(cfg, emit_disabled)
     for w in warnings:
-        print(f"! {w}")
+        print_warning(str(w))
     if errors:
         for e in errors:
-            print(f"ERROR: {e}", file=sys.stderr)
+            print_error(str(e))
         return None
     dsl.parent.mkdir(parents=True, exist_ok=True)
     dsl.write_text(render_ssdt(controllers, oem_id, table_id, darwin), encoding="utf-8")
-    print(f"Wrote {dsl}")
+    print_success(f"Wrote {c_blue(str(dsl))}")
     return controllers
 
 
@@ -1254,8 +1365,12 @@ def compile_dsl(dsl: Path, iasl: Iasl) -> Optional[Path]:
 
 
 def install_to_efi(aml: Path, oc_dir: Path, renames=()) -> None:
-    if (oc_dir / "OC").is_dir():
+    # Resolve standard OpenCore directory layouts (root folder, EFI/, or OC/)
+    if (oc_dir / "EFI" / "OC").is_dir():
+        oc_dir = oc_dir / "EFI" / "OC"
+    elif (oc_dir / "OC").is_dir():
         oc_dir = oc_dir / "OC"
+
     cfg_path = oc_dir / "config.plist"
     if not cfg_path.is_file():
         raise UserError(f"config.plist not found in {oc_dir}")
@@ -1291,8 +1406,8 @@ def install_to_efi(aml: Path, oc_dir: Path, renames=()) -> None:
             })
     with cfg_path.open("wb") as f:
         plistlib.dump(cfg, f, sort_keys=False)
-    print(f"Installed {aml.name} to {oc_dir / 'ACPI'}")
-    print(f"Updated config.plist (Backup: {backup.name})")
+    print_success(f"Installed {c_cyan(aml.name)} to {c_blue(str(oc_dir / 'ACPI'))}")
+    print_success(f"Updated {c_cyan('config.plist')} (Backup: {backup.name})")
 
 
 # ---------------------------------------------------------------------------
@@ -1332,7 +1447,6 @@ def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not isinstance(raw_ports, dict):
                 continue
 
-            # Identify controller name from personality key or IONameMatch
             ctrl_name = personality.get("IONameMatch") or personality_key.split("-")[-1]
             ctrl_name = ctrl_name.split("@")[0].strip()
 
@@ -1341,8 +1455,6 @@ def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if not isinstance(p_val, dict):
                     continue
 
-                # Detect enabled vs disabled port in IOKitPersonalities:
-                # Ports are enabled ONLY if "enabled" is explicitly True.
                 is_disabled = (
                     str(p_key).startswith("#")
                     or bool(p_val.get("disabled", False))
@@ -1459,7 +1571,6 @@ def apply_usbmap_to_acpi_controllers(
         acpi_tokens = normalize_path_tokens(acpi_ctrl["path"])
         acpi_leaf = acpi_tokens[-1] if acpi_tokens else ""
 
-        # Find corresponding USBMap controller
         matched_usb_ctrl = None
         for uc in usbmap_controllers:
             if uc.get("acpi_path"):
@@ -1471,14 +1582,12 @@ def apply_usbmap_to_acpi_controllers(
                 matched_usb_ctrl = uc
                 break
 
-        # Fallback: single controller in both
         if not matched_usb_ctrl and len(acpi_controllers) == 1 and len(usbmap_controllers) == 1:
             matched_usb_ctrl = usbmap_controllers[0]
 
         if not matched_usb_ctrl:
             continue
 
-        # Map USBMap ports by decoded integer address (_ADR)
         usbmap_by_adr: Dict[int, Dict[str, Any]] = {}
         for up in matched_usb_ctrl["ports"]:
             if up["address"] is not None:
@@ -1688,11 +1797,22 @@ def print_controller_list(controllers: list) -> None:
         hs = sum(p["name"].upper().startswith("HS") for p in ports)
         ss = sum(p["name"].upper().startswith("SS") for p in ports)
         sel = sum(bool(p["keep"]) for p in ports)
-        live_tag = f"  [{c['live_info']}]" if "live_info" in c else ""
-        print(f"  {n:>2}. {c['path']}.{c['hub']}{live_tag}")
-        print(f"      {len(ports)} ports (HS {hs}, SS {ss}) | selected {sel}/{MAX_PORTS}")
+
+        live_tag = ""
+        if "live_info" in c:
+            info = c["live_info"]
+            formatted_info = f"[{info}]"
+            live_tag = "  " + (c_green(formatted_info) if c.get("is_live") else c_dim(formatted_info))
+
+        sel_text = f"{sel}/{MAX_PORTS}"
+        sel_color = c_green(sel_text) if sel <= MAX_PORTS else c_bright_red(f"{sel_text} (OVER LIMIT)")
+        ctrl_path = f"{c['path']}.{c['hub']}"
+        num_str = f"{n:>2}."
+        print(f"  {c_cyan(num_str)} {c_bold(ctrl_path)}{live_tag}")
+        print(f"      {len(ports)} ports (HS {hs}, SS {ss}) | selected {sel_color}")
         if c.get("conditional"):
-            print(f"      conditional: {c.get('condition', '')[:70]}")
+            cond = c.get("condition", "")[:70]
+            print(f"      {c_yellow('conditional:')} {cond}")
 
 
 def edit_controller(c: dict) -> None:
@@ -1701,20 +1821,31 @@ def edit_controller(c: dict) -> None:
         sel = sum(bool(p["keep"]) for p in ports)
         head(f"Choose Ports: {c['path']}")
         if "live_info" in c:
-            print(f" Status: {c['live_info']}")
-        print(f" Selected: {sel}/{MAX_PORTS}" + ("  !! OVER LIMIT !!" if sel > MAX_PORTS else ""))
-        print(f"\n  {'#':>3}  {'Port':<5} {'_ADR':<6} {'Use':<4} {'Type':<15} {'OEM':<4} Label")
+            info = c["live_info"]
+            st = c_green(info) if c.get("is_live") else c_dim(info)
+            print(f" Status:   {st}")
+        sel_text = f"{sel}/{MAX_PORTS}"
+        over_msg = c_bright_red("  !! OVER LIMIT !!") if sel > MAX_PORTS else ""
+        sel_colored = c_green(sel_text) if sel <= MAX_PORTS else c_bright_red(sel_text)
+        print(f" Selected: {sel_colored}{over_msg}")
+        print(c_cyan(f"\n  {'#':>3}  {'Port':<5} {'_ADR':<6} {'Use':<4} {'Type':<15} {'OEM':<4} Label"))
         for n, p in enumerate(ports, 1):
-            print(f"  {n:>3}  {p['name']:<5} {str(p.get('adr') or '?'):<6} [{'x' if p['keep'] else ' '}]  "
-                  f"{str(p['type']):<15} {oem_state(p):<4} {p.get('label', '')}")
-        print("\n  Commands:")
-        print("    k <ports>         Toggle selection (e.g. k 1,2 or k HS01)")
-        print("    on/off <ports>    Select / deselect ports")
-        print("    t <ports> <type>  Set type (typea, usb3-a, typec-switch, internal, etc.)")
-        print("    l <port> <text>   Assign description/label (e.g. l 1 Front USB3)")
-        print("    a auto            Infer missing _ADR numbers")
-        print("    d (done)          Save & return to controller list")
-        line = grab("\n Command: ").strip()
+            use_char = "x" if p["keep"] else " "
+            use_box = f"[{c_green(use_char) if p['keep'] else ' '}]"
+            pname = c_bright_white(f"{p['name']:<5}") if p["keep"] else f"{p['name']:<5}"
+            adr_str = f"{str(p.get('adr') or '?'):<6}"
+            type_str = f"{str(p['type']):<15}"
+            oem_str = f"{oem_state(p):<4}"
+            lbl = str(p.get('label', ''))
+            print(f"  {n:>3}  {pname} {adr_str} {use_box}  {type_str} {oem_str} {lbl}")
+        print(f"\n  {c_bold('Commands:')}")
+        print(f"    {c_cyan('k <ports>')}         Toggle selection (e.g. k 1,2 or k HS01)")
+        print(f"    {c_cyan('on/off <ports>')}    Select / deselect ports")
+        print(f"    {c_cyan('t <ports> <type>')}  Set type (typea, usb3-a, typec-switch, internal, etc.)")
+        print(f"    {c_cyan('l <port> <text>')}   Assign description/label (e.g. l 1 Front USB3)")
+        print(f"    {c_cyan('a auto')}            Infer missing _ADR numbers")
+        print(f"    {c_cyan('d (done)')}          Save & return to controller list")
+        line = grab(f"\n {c_cyan('Command:')} ").strip()
         if not line:
             continue
         parts = line.split(None, 1)
@@ -1733,7 +1864,7 @@ def edit_controller(c: dict) -> None:
                 for i in parse_selection(spec, ports):
                     ports[i]["type"] = TYPE_NAMES.get(v, v)
             except ValueError as e:
-                print(f"! {e}")
+                print_warning(str(e))
         elif verb == "l":
             spec, _, text = rest.partition(" ")
             clean_text = sanitize_comment(text)
@@ -1741,13 +1872,13 @@ def edit_controller(c: dict) -> None:
                 ports[i]["label"] = clean_text
         elif verb == "a" and rest.strip() == "auto":
             done = infer_adrs(ports)
-            print("Inferred: " + ", ".join(done))
+            print_success("Inferred: " + ", ".join(done))
 
 
 def select_acpi(sess: Session) -> bool:
     head("Select ACPI Tables")
     print("Drag and drop your ACPI folder (e.g. SysReport/ACPI) or DSDT/SSDT files.\n")
-    raw = grab(" Path: ").strip()
+    raw = grab(f" {c_cyan('Path:')} ").strip()
     paths = parse_dropped(raw)
     if not paths:
         return False
@@ -1761,15 +1892,15 @@ def select_acpi(sess: Session) -> bool:
         ghost_cnt = len(scanned) - live_cnt
         print(f"\nDiscovered {len(scanned)} root hub(s) in ACPI:")
         if live_cnt > 0:
-            print(f" -> {live_cnt} active controller(s) confirmed in live IORegistry.")
+            print(f"  {c_green('➜')} {live_cnt} active controller(s) confirmed in live IORegistry.")
             if ghost_cnt > 0:
-                print(f" -> {ghost_cnt} dormant/ghost ACPI hub(s) automatically hidden.")
+                print(f"  {c_dim('➜')} {ghost_cnt} dormant/ghost ACPI hub(s) automatically hidden.")
         else:
-            print(" -> Offline ACPI tables detected; displaying all declared ACPI hubs.")
+            print(f"  {c_yellow('➜')} Offline ACPI tables detected; displaying all declared ACPI hubs.")
         return True
     except UserError as e:
-        print(f"\n! {e}")
-        grab("Press enter to continue...")
+        print_error(str(e))
+        grab("\nPress enter to continue...")
         return False
 
 
@@ -1781,26 +1912,29 @@ def import_port_file(sess: Session, path: Path) -> None:
     except Exception:
         doc = plistlib.loads(raw_bytes)
 
-    # Check if USBMap format
     usbmap_ctrls = parse_usbmap_controllers(doc) if isinstance(doc, dict) else []
 
     if usbmap_ctrls and sess.all_controllers:
         matched, total = apply_usbmap_to_acpi_controllers(sess.all_controllers, usbmap_ctrls)
-        print(f"\nMatched and imported {matched} enabled port(s) across {total} ACPI port(s) using _ADR.")
-        print("Original ACPI port names, _ADR declarations, and paths were fully preserved.")
+        print()
+        print_success(f"Matched and imported {matched} enabled port(s) across {total} ACPI port(s) using _ADR.")
+        print_info("Original ACPI port names, _ADR declarations, and paths were fully preserved.")
         sess.acpi_label = f"{sess.acpi_label} + {path.name}"
     else:
         loaded = normalize_imported_data(doc)["controllers"]
         sess.set_scanned_controllers(loaded)
         sess.acpi_label = f"{path.name} (imported)"
-        print(f"\nLoaded {len(loaded)} controller(s) successfully.")
+        print()
+        print_success(f"Loaded {len(loaded)} controller(s) successfully.")
 
 
 def interactive(iasl_path=None, auto_download=False) -> None:
     sess = Session(iasl=Iasl(iasl_path, auto_download))
     while True:
-        head(f"XHUB Mapper v{__version__} (macOS Edition)")
-        print(f" ACPI:   {sess.acpi_label or 'not loaded'}")
+        if sys.stdout.isatty():
+            os.system("clear")
+        print_banner()
+        print(f" {c_cyan('ACPI:')}          {sess.acpi_label or 'not loaded'}")
         if sess.all_controllers:
             live_cnt = sum(1 for c in sess.all_controllers if c.get("is_live"))
             shown_cnt = len(sess.controllers)
@@ -1809,17 +1943,20 @@ def interactive(iasl_path=None, auto_download=False) -> None:
                 f" (showing all including {ghost_cnt} ghosts)"
                 if sess.show_ghosts else f" ({ghost_cnt} dormant ghosts hidden)"
             )
-            print(f" Hubs:   {shown_cnt} controller(s) visible{ghost_status}")
-        print(f" iasl:   {sess.iasl.get() or 'not found'}")
-        print(f" Darwin Check: {'OSDW ()' if sess.darwin == 'osdw' else '_OSI (\"Darwin\")'}\n")
-        print(" 1. Select ACPI folder / tables (drag and drop)")
-        print(" 2. Choose controllers / ports")
-        print(" 3. Generate SSDT-XHUB")
-        print(" 4. Save ports.json")
-        print(" 5. Load ports.json (or USBMap / USBToolBox files)")
-        print(" 6. Toggle Darwin check (_OSI <-> OSDW)")
-        print(" Q. Quit\n")
-        choice = grab(" Option: ").strip().lower()
+            print(f" {c_cyan('Hubs:')}          {shown_cnt} controller(s) visible{ghost_status}")
+        print(f" {c_cyan('iasl:')}          {sess.iasl.get() or 'not found'}")
+        darwin_disp = 'OSDW ()' if sess.darwin == 'osdw' else '_OSI ("Darwin")'
+        print(f" {c_cyan('Darwin Check:')}  {darwin_disp}\n")
+
+        print(f"  {c_cyan('1.')} Select ACPI folder / tables (drag and drop)")
+        print(f"  {c_cyan('2.')} Choose controllers / ports")
+        print(f"  {c_cyan('3.')} Generate SSDT-XHUB")
+        print(f"  {c_cyan('4.')} Save ports.json")
+        print(f"  {c_cyan('5.')} Load ports.json (or USBMap / USBToolBox files)")
+        print(f"  {c_cyan('6.')} Toggle Darwin check (_OSI <-> OSDW)")
+        print(f"  {c_red('Q.')} Quit\n")
+
+        choice = grab(f" {c_cyan('Option:')} ").strip().lower()
         if choice == "1":
             if select_acpi(sess) and sess.controllers:
                 grab("\nPress enter to continue...")
@@ -1838,12 +1975,12 @@ def interactive(iasl_path=None, auto_download=False) -> None:
                     print(f" Mode: {status}\n")
 
                 print_controller_list(current_ctrls)
-                print("\n  <number>  Choose ports of controller")
+                print(f"\n  {c_cyan('<number>')}  Choose ports of controller")
                 if ghost_cnt > 0:
-                    print("  g         Toggle show/hide dormant ghost ACPI hubs")
-                print("  d         Done (return to main menu)")
+                    print(f"  {c_cyan('g')}         Toggle show/hide dormant ghost ACPI hubs")
+                print(f"  {c_cyan('d')}         Done (return to main menu)")
 
-                cmd = grab("\n Command: ").strip().lower()
+                cmd = grab(f"\n {c_cyan('Command:')} ").strip().lower()
                 if cmd in ("d", "done"):
                     break
                 if cmd == "g" and ghost_cnt > 0:
@@ -1860,38 +1997,38 @@ def interactive(iasl_path=None, auto_download=False) -> None:
             if ctrls:
                 aml = compile_dsl(dsl, sess.iasl)
                 if aml:
-                    print(f"\nCompiled {aml}")
-                    raw = grab("Drag EFI/OC folder here to install (or enter to skip): ").strip()
+                    print()
+                    print_success(f"Compiled {aml}")
+                    raw = grab(f"\n{c_cyan('➜')} Drag EFI/OC folder here to install (or enter to skip): ").strip()
                     if raw:
                         tgt = check_path(raw)
                         if tgt and tgt.is_dir():
-                            install_to_efi(aml, tgt, [c["rename"] for c in ctrls if c.get("rename")])
+                            try:
+                                install_to_efi(aml, tgt, [c["rename"] for c in ctrls if c.get("rename")])
+                            except UserError as e:
+                                print_error(str(e))
             grab("\nPress enter to continue...")
         elif choice == "4":
             if sess.controllers:
-                write_ports_json(results_dir() / "ports.json", sess.controllers)
-                print(f"Saved to {results_dir() / 'ports.json'}")
+                out_p = results_dir() / "ports.json"
+                write_ports_json(out_p, sess.controllers)
+                print_success(f"Saved to {out_p}")
             grab("Press enter to continue...")
         elif choice == "5":
-            raw = grab("Drag port map JSON / plist here: ").strip()
+            raw = grab(f"\n{c_cyan('➜')} Drag port map JSON / plist here: ").strip()
             paths = parse_dropped(raw)
-            #print(f"DEBUG: Parsed paths: {paths}")
-
             p = paths[0] if len(paths) == 1 else None
-
-            #print(f"DEBUG: Selected path: {p}")
-            #print(f"DEBUG: Exists: {p.exists() if p else False}")
             if p and p.is_file():
                 try:
-                    #print("DEBUG: Calling import_port_file()")
                     import_port_file(sess, p)
                 except Exception as e:
-                    print(f"! {e}")
-            grab("Press enter to continue...")
+                    print_error(str(e))
+            grab("\nPress enter to continue...")
         elif choice == "6":
             sess.darwin = "osdw" if sess.darwin == "osi" else "osi"
         elif choice == "q":
             sys.exit(0)
+
 
 # ---------------------------------------------------------------------------
 # CLI Command Implementations
@@ -1899,7 +2036,7 @@ def interactive(iasl_path=None, auto_download=False) -> None:
 
 def cmd_scan(args: argparse.Namespace) -> None:
     iasl = Iasl(args.iasl, args.download_iasl)
-    paths = [Path(p) for p in args.paths] or parse_dropped(grab("Path: ").strip())
+    paths = [Path(p) for p in args.paths] or parse_dropped(grab(f"{c_cyan('Path:')} ").strip())
     sources = load_acpi(paths, iasl)
     controllers = scan_sources(sources, args.preselect)
     if not controllers:
@@ -1912,8 +2049,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
     write_ports_json(out_path, to_save)
     live_cnt = len(active_only)
     ghost_cnt = len(controllers) - live_cnt
-    print(f"Scanned {len(controllers)} hub(s) in ACPI. ({live_cnt} active in macOS, {ghost_cnt} ghost hubs).")
-    print(f"Wrote {len(to_save)} controller configuration(s) to {out_path}")
+    print_info(f"Scanned {len(controllers)} hub(s) in ACPI. ({live_cnt} active in macOS, {ghost_cnt} ghost hubs).")
+    print_success(f"Wrote {len(to_save)} controller configuration(s) to {out_path}")
 
 
 def cmd_generate(args: argparse.Namespace) -> None:
@@ -1934,7 +2071,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         iasl = Iasl(args.iasl, args.download_iasl)
         aml = compile_dsl(dsl, iasl)
         if aml:
-            print(f"Successfully compiled {aml}")
+            print_success(f"Successfully compiled {aml}")
             if args.efi:
                 oc_dir = check_path(args.efi)
                 if not oc_dir or not oc_dir.is_dir():
@@ -1950,7 +2087,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def run_tests() -> None:
-    print("Running verification suite...")
+    print_banner()
+    print_info("Running verification suite...")
 
     # 1. ASL evaluation
     ctx = ({"SSPA": ["Return (0x10)"], "CALC": ["Return (Add (SSPA (), 0x02))"]}, {"BASE": 5})
@@ -2057,22 +2195,14 @@ def run_tests() -> None:
 
     acpi_p = {to_int(p["adr"]): p for p in mock_acpi_controllers[0]["ports"]}
 
-    # Verifications:
-    # Enabled ports are selected
     assert acpi_p[1]["keep"] is True, "POT1 (_ADR 0x01) must be selected (enabled in USBMap)"
     assert acpi_p[17]["keep"] is True, "POT3 (_ADR 0x11) must be selected (enabled in USBMap)"
-
-    # Disabled ports are unselected
     assert acpi_p[2]["keep"] is False, "POT2 (_ADR 0x02) must be unselected (disabled in USBMap)"
     assert acpi_p[18]["keep"] is False, "POT4 (_ADR 0x12) must be unselected (disabled in USBMap)"
-
-    # ACPI names, _ADR, paths, and _PLD are NOT overwritten
     assert acpi_p[1]["name"] == "POT1", "ACPI port name 'POT1' must not be overwritten by USBMap 'HS01'"
     assert acpi_p[1]["adr"] == "0x01", "ACPI _ADR must remain unchanged"
     assert acpi_p[1]["pld_lines"] == ["/* pld */"], "ACPI _PLD buffer must remain preserved"
     assert mock_acpi_controllers[0]["path"] == "\\_SB.PCI0.XHC", "ACPI path must remain unchanged"
-
-    # Type and Label are supplemented
     assert acpi_p[1]["label"] == "Front USB 2.0 Enabled", "Label should be supplemented from USBMap"
     assert acpi_p[17]["label"] == "Front USB 3.0 Enabled", "Label should be supplemented from USBMap"
 
@@ -2083,7 +2213,6 @@ def run_tests() -> None:
         assert ctrls is not None, "Failed to generate SSDT"
         content = dsl_file.read_text(encoding="utf-8")
 
-        # Verify only enabled ports are emitted
         assert "Device (POT1)" in content, "POT1 must be emitted in SSDT"
         assert "Device (POT3)" in content, "POT3 must be emitted in SSDT"
         assert "Device (POT2)" not in content, "Disabled POT2 must not be emitted"
@@ -2093,12 +2222,12 @@ def run_tests() -> None:
 
     # 8. Live IORegistry query verification on macOS host
     live = get_live_xhci_controllers()
-    print(f"Live IORegistry detected {len(live)} active physical XHCI controller(s) on this Mac:")
+    print_info(f"Live IORegistry detected {len(live)} active physical XHCI controller(s) on this Mac:")
     for lc in live:
         ports_str = f" ({len(lc.active_ports)} active ports)" if lc.active_ports else ""
-        print(f" - {lc.name} at {lc.acpi_path} [PCI: {lc.pci_debug}, Driver: {lc.driver}]{ports_str}")
+        print(f"  • {c_bold(lc.name)} at {c_blue(lc.acpi_path)} [PCI: {c_yellow(lc.pci_debug)}, Driver: {c_cyan(lc.driver)}]{ports_str}")
 
-    print("All verification tests passed successfully.")
+    print_success("All verification tests passed successfully.")
 
 
 def main():
@@ -2130,7 +2259,7 @@ def main():
     g.add_argument("--table-id", default="XHUB")
     g.add_argument("--iasl", help="path to custom iasl")
     g.add_argument("--download-iasl", action="store_true", help="auto-download iasl if missing")
-    g.set_defaults(func=cmd_generate)
+    s_def = g.set_defaults(func=cmd_generate)
 
     t = sub.add_parser("test", help="run tests and query live IORegistry")
     t.set_defaults(func=lambda a: run_tests())
