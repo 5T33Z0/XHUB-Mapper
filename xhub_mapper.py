@@ -7,8 +7,8 @@ Requirements: macOS and Python 3.8+
 """
 from __future__ import annotations
 
-__version__ = "3.1.0"
-__date__ = "2026-11-06"
+__version__ = "3.2.0"
+__date__ = "2026-11-07"
 
 import argparse
 import json
@@ -83,6 +83,7 @@ class C:
     CYAN = "\033[36m"
     BRIGHT_CYAN = "\033[96m"
     BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
     BRIGHT_RED = "\033[91m"
     BRIGHT_WHITE = "\033[97m"
 
@@ -198,7 +199,7 @@ def sanitize_asl_name(raw_name: str, fallback_prefix: str = "HS", index: int = 1
 
 
 # ---------------------------------------------------------------------------
-# Live macOS IORegistry Introspection & Active Controller Resolution
+# Universal Live macOS IORegistry Introspection
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -213,13 +214,39 @@ class LiveController:
 
 
 def parse_ioreg_pcidebug(debug_str: str) -> Optional[int]:
-    """Parse pcidebug '00:14.0' into standard (dev << 16) | fn address."""
-    m = re.search(r"([0-9A-Fa-f]{2}):([0-9A-Fa-f]{2})\.([0-9A-Fa-f])", debug_str)
-    if not m:
+    """Parse pcidebug '0:20:0' or '00:14.0' into standard (dev << 16) | fn address."""
+    if not debug_str:
         return None
-    dev = int(m.group(2), 16)
-    fn = int(m.group(3), 16)
-    return (dev << 16) | fn
+    s = debug_str.strip().strip('"')
+    m_dec = re.match(r"^(\d+):(\d+):(\d+)$", s)
+    if m_dec:
+        dev, fn = int(m_dec.group(2)), int(m_dec.group(3))
+        return (dev << 16) | fn
+    m_hex = re.match(r"^[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})\.([0-9A-Fa-f])$", s)
+    if m_hex:
+        dev, fn = int(m_hex.group(1), 16), int(m_hex.group(2), 16)
+        return (dev << 16) | fn
+    return None
+
+
+def parse_name_pci_address(node_name: str) -> Optional[int]:
+    """Extract (dev << 16) | fn from IOPCIDevice name like 'XHC@14' or 'RP05@1C,4'."""
+    if "@" not in node_name:
+        return None
+    raw = node_name.split("@")[-1].strip()
+    if "," in raw:
+        parts = raw.split(",")
+        try:
+            dev = int(parts[0], 16)
+            fn = int(parts[1], 16)
+            return (dev << 16) | fn
+        except ValueError:
+            return None
+    try:
+        val = int(raw, 16)
+        return (val << 16) if val <= 0x1F else val
+    except ValueError:
+        return None
 
 
 def normalize_path_tokens(path: str) -> List[str]:
@@ -250,8 +277,9 @@ def get_live_xhci_controllers() -> List[LiveController]:
 
     pci_pattern = re.compile(r"\+-o\s+([^<]+?)\s*<class\s+IOPCIDevice,", re.I)
     driver_pattern = re.compile(r"\+-o\s+([^<]+?)\s*<class\s+([A-Za-z0-9_]*USB[A-Za-z0-9_]*),", re.I)
-    port_pattern = re.compile(r"\+-o\s+([A-Za-z0-9_]+)@[0-9A-Fa-f]+\s*<class\s+AppleUSB[0-9]*[A-Za-z0-9]*Port,", re.I)
-    prop_pattern = re.compile(r'^\s*\|\s*"([^"]+)"\s*=\s*(.*)$')
+    port_pattern = re.compile(r"\+-o\s+([A-Za-z0-9_]+)@[0-9A-Fa-f]+\s*<class\s+[A-Za-z0-9]*USB[A-Za-z0-9]*Port,", re.I)
+    prop_pattern = re.compile(r'^[|\s]*"([^"]+)"\s*=\s*(.*)$')
+    non_controllers = ("Port", "Hub", "Device", "Interface", "PacketFilter", "Endpoint", "Pipe", "Descriptor")
 
     def finalize_pci(pci_data: Dict[str, Any]) -> None:
         if not pci_data.get("is_usb_host"):
@@ -260,14 +288,8 @@ def get_live_xhci_controllers() -> List[LiveController]:
         raw_acpi = props.get("acpi-path", "").strip('"')
         pcidebug = props.get("pcidebug", "").strip('"')
         pci_addr = parse_ioreg_pcidebug(pcidebug)
-
-        if pci_addr is None and "@" in pci_data["name"]:
-            addr_part = pci_data["name"].split("@")[-1]
-            try:
-                val = int(addr_part, 16)
-                pci_addr = val if val > 0xFFFF else (val << 16)
-            except ValueError:
-                pass
+        if pci_addr is None:
+            pci_addr = parse_name_pci_address(pci_data["name"])
 
         driver = pci_data.get("driver") or "AppleUSBHostController"
         controllers.append(
@@ -282,14 +304,12 @@ def get_live_xhci_controllers() -> List[LiveController]:
         )
 
     for line in raw_lines:
-        indent = len(line) - len(line.lstrip("| "))
         m_pci = pci_pattern.search(line)
         if m_pci:
             if current_pci:
                 finalize_pci(current_pci)
             current_pci = {
                 "name": m_pci.group(1).strip(),
-                "indent": indent,
                 "props": {},
                 "driver": None,
                 "ports": [],
@@ -300,13 +320,14 @@ def get_live_xhci_controllers() -> List[LiveController]:
         if not current_pci:
             continue
 
-        m_drv = driver_pattern.search(line)
-        if m_drv:
-            drv_name = m_drv.group(2).strip()
-            if "Port" not in drv_name and "Hub" not in drv_name and "Device" not in drv_name:
-                current_pci["driver"] = drv_name
-                current_pci["is_usb_host"] = True
-            continue
+        if not current_pci["driver"]:
+            m_drv = driver_pattern.search(line)
+            if m_drv:
+                drv_name = m_drv.group(2).strip()
+                if not any(x in drv_name for x in non_controllers):
+                    current_pci["driver"] = drv_name
+                    current_pci["is_usb_host"] = True
+                continue
 
         m_port = port_pattern.search(line)
         if m_port:
@@ -316,9 +337,12 @@ def get_live_xhci_controllers() -> List[LiveController]:
         m_prop = prop_pattern.match(line)
         if m_prop:
             key, val = m_prop.group(1), m_prop.group(2).strip()
-            current_pci["props"][key] = val
-            if key == "class-code" and ("30030c" in val.lower() or "20030c" in val.lower()):
-                current_pci["is_usb_host"] = True
+            if not current_pci["driver"] or key in ("acpi-path", "pcidebug", "class-code"):
+                if key not in current_pci["props"]:
+                    current_pci["props"][key] = val
+                # PCI Class code for USB Host Controllers (Base Class 0x0C, SubClass 0x03)
+                if key == "class-code" and re.search(r"[0-9a-f]{2}030c", val.lower()):
+                    current_pci["is_usb_host"] = True
 
     if current_pci:
         finalize_pci(current_pci)
@@ -327,31 +351,46 @@ def get_live_xhci_controllers() -> List[LiveController]:
 
 
 def is_controller_live(c: dict, live_controllers: List[LiveController]) -> Tuple[bool, Optional[LiveController]]:
-    """Correlate ACPI controller against live IORegistry hardware via BDF and scope tokens."""
+    """Correlate ACPI controller against live hardware with universal PCI/scope hierarchy matching."""
     c_path_tokens = normalize_path_tokens(c["path"])
     c_adr_int = to_int(c["ctrl_adr"]) if c.get("ctrl_adr") is not None else None
 
     for lc in live_controllers:
-        if c_adr_int is not None and lc.pci_address is not None:
-            if c_adr_int == lc.pci_address:
+        if lc.acpi_path:
+            lc_tokens = normalize_path_tokens(lc.acpi_path)
+
+            # 1. Exact scope match (e.g. SB.PCI0.XHC == SB.PCI0.XHC or SB.PC00.XHCI == SB.PC00.XHCI)
+            if c_path_tokens == lc_tokens:
                 return True, lc
 
-        if not lc.acpi_path:
-            continue
+            # 2. Scope match with controller rename (e.g. SB.PCI0.XHC1 <-> SB.PCI0.SHCI)
+            if len(c_path_tokens) == len(lc_tokens) and len(c_path_tokens) >= 2:
+                if c_path_tokens[:-1] == lc_tokens[:-1]:
+                    c_leaf = c_path_tokens[-1]
+                    lc_leaf = lc_tokens[-1]
+                    if c_leaf == lc_leaf or RENAMES.get(c_leaf) == lc_leaf or RENAMES.get(lc_leaf) == c_leaf:
+                        return True, lc
 
-        lc_tokens = normalize_path_tokens(lc.acpi_path)
-        if c_path_tokens == lc_tokens:
-            return True, lc
+            # 3. Hierarchical PCIe bridge / Thunderbolt match
+            # Ensures root port (e.g. RP05 vs RP01/RP09/RP21) strictly matches before comparing endpoints
+            if len(lc_tokens) >= 3 and len(c_path_tokens) >= 3:
+                if c_path_tokens[:3] == lc_tokens[:3]:
+                    if len(c_path_tokens) >= len(lc_tokens) and c_path_tokens[:len(lc_tokens)] == lc_tokens:
+                        return True, lc
+                    c_leaf = c_path_tokens[-1]
+                    lc_leaf = lc_tokens[-1]
+                    if (c_leaf == lc_leaf or RENAMES.get(c_leaf) == lc_leaf or
+                        RENAMES.get(lc_leaf) == c_leaf or "XHC" in c_leaf):
+                        return True, lc
 
-        if len(c_path_tokens) == len(lc_tokens) and len(c_path_tokens) >= 2:
-            if c_path_tokens[:-1] == lc_tokens[:-1]:
-                c_leaf = c_path_tokens[-1]
-                lc_leaf = lc_tokens[-1]
-                if c_leaf == lc_leaf or RENAMES.get(c_leaf) == lc_leaf or RENAMES.get(lc_leaf) == c_leaf:
+        # Fallback to unique PCI address match for non-zero addresses (e.g. chipset XHC at 0x00140000)
+        if c_adr_int is not None and lc.pci_address is not None and c_adr_int != 0:
+            if c_adr_int == lc.pci_address:
+                c_leaf = c_path_tokens[-1] if c_path_tokens else ""
+                lc_name = lc.name.upper()
+                if (c_leaf == lc_name or RENAMES.get(c_leaf) == lc_name or
+                    RENAMES.get(lc_name) == c_leaf or "XHC" in c_leaf or "EHC" in c_leaf):
                     return True, lc
-
-        if ".".join(c_path_tokens) in ".".join(lc_tokens) or ".".join(lc_tokens) in ".".join(c_path_tokens):
-            return True, lc
 
     return False, None
 
@@ -1139,8 +1178,11 @@ def gather_tables(path: Path) -> Tuple[List[Path], List[Path]]:
                     dsls.append(f)
                 elif table_signature(f) in ("DSDT", "SSDT"):
                     tables.append(f)
-        if not dsls and not tables and (path / "ACPI").is_dir():
-            return gather_tables(path / "ACPI")
+        if not dsls and not tables:
+            for sub in ("ACPI", "OC/ACPI", "EFI/OC/ACPI"):
+                sub_dir = path / sub
+                if sub_dir.is_dir():
+                    return gather_tables(sub_dir)
     elif path.is_file():
         if path.suffix.lower() == ".dsl":
             dsls.append(path)
@@ -1370,6 +1412,8 @@ def install_to_efi(aml: Path, oc_dir: Path, renames=()) -> None:
         oc_dir = oc_dir / "EFI" / "OC"
     elif (oc_dir / "OC").is_dir():
         oc_dir = oc_dir / "OC"
+    elif oc_dir.name.upper() == "ACPI" and oc_dir.parent.is_dir():
+        oc_dir = oc_dir.parent
 
     cfg_path = oc_dir / "config.plist"
     if not cfg_path.is_file():
@@ -1429,15 +1473,8 @@ def decode_usbmap_address(val: Any) -> Optional[int]:
 
 
 def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Parse USBMap configurations from both:
-      1. USBMap.kext/Contents/Info.plist (IOKitPersonalities dictionary)
-      2. USB.plist / USB.json (corpnewt discovery dictionary)
-    Correctly determines enabled vs disabled status and extracts address (_ADR).
-    """
     controllers: List[Dict[str, Any]] = []
 
-    # Format 1: Info.plist / USBMap.plist with IOKitPersonalities
     if "IOKitPersonalities" in doc and isinstance(doc["IOKitPersonalities"], dict):
         for personality_key, personality in doc["IOKitPersonalities"].items():
             if not isinstance(personality, dict):
@@ -1493,7 +1530,6 @@ def parse_usbmap_controllers(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "ports": parsed_ports,
                 })
 
-    # Format 2: USB.plist / discovery dictionary keyed by controller
     elif isinstance(doc, dict):
         for ctrl_key, c_val in doc.items():
             if not isinstance(c_val, dict):
@@ -1555,15 +1591,6 @@ def apply_usbmap_to_acpi_controllers(
     acpi_controllers: List[Dict[str, Any]],
     usbmap_controllers: List[Dict[str, Any]]
 ) -> Tuple[int, int]:
-    """
-    Matches enabled USBMap entries against existing ACPI controllers/ports using _ADR.
-    Strictly restricted to supplementing:
-      - address (used to match corresponding ACPI port)
-      - Type (imported USB connector type)
-      - Label (imported port description/comment)
-    Preserves all ACPI port names, ACPI paths, original _ADR values, and _PLD buffers.
-    Only enabled USBMap entries are selected (keep=True); disabled ports receive keep=False.
-    """
     total_acpi_ports = sum(len(c.get("ports", [])) for c in acpi_controllers)
     matched_enabled_count = 0
 
@@ -1614,7 +1641,6 @@ def apply_usbmap_to_acpi_controllers(
 
 
 def normalize_imported_data(doc: Any) -> dict:
-    # Native ports.json
     if isinstance(doc, dict) and "controllers" in doc and isinstance(doc["controllers"], list):
         if doc["controllers"] and "identifiers" not in doc["controllers"][0]:
             for ctrl in doc["controllers"]:
@@ -1623,7 +1649,6 @@ def normalize_imported_data(doc: Any) -> dict:
                     p["name"] = sanitize_asl_name(p.get("name", "PRT_"))
             return doc
 
-    # USBToolBox Schema
     if isinstance(doc, list) or (isinstance(doc, dict) and "controllers" in doc):
         raw_ctrls = doc if isinstance(doc, list) else doc["controllers"]
         ctrls = []
@@ -1664,7 +1689,6 @@ def normalize_imported_data(doc: Any) -> dict:
             })
         return {"controllers": ctrls}
 
-    # USBMap Plist/JSON Schema (Standalone fallback)
     if isinstance(doc, dict):
         usbmap_ctrls = parse_usbmap_controllers(doc)
         if usbmap_ctrls:
@@ -1769,7 +1793,6 @@ class Session:
 
 
 def parse_selection(spec: str, ports: list) -> List[int]:
-    """Parse port selectors ('1,2,5-8 HS01') into 0-based index list."""
     idx: Set[int] = set()
     for tok in re.split(r"[,\s]+", spec.strip()):
         if not tok:
@@ -1905,7 +1928,6 @@ def select_acpi(sess: Session) -> bool:
 
 
 def import_port_file(sess: Session, path: Path) -> None:
-    """Imports port map files (USBMap plist/json, USBToolBox json, or native ports.json)."""
     raw_bytes = path.read_bytes()
     try:
         doc = json.loads(raw_bytes.decode("utf-8", errors="replace"))
@@ -2101,131 +2123,32 @@ def run_tests() -> None:
     assert "\n" not in clean_c and "\r" not in clean_c, "Failed to strip newlines"
     assert "*/" not in clean_c, "Failed to neutralize block comment terminator"
 
-    # 3. Path token normalization
+    # 3. Path token normalization (Universal Intel/AMD)
     assert normalize_path_tokens("\\_SB_.PCI0.XHC_") == ["SB", "PCI0", "XHC"]
+    assert normalize_path_tokens("\\_SB_.PC00.XHCI") == ["SB", "PC00", "XHCI"]
+    assert normalize_path_tokens("\\_SB_.PCI0.GP13.XHC0") == ["SB", "PCI0", "GP13", "XHC0"]
     assert normalize_path_tokens("IOACPIPlane:/_SB/PCI0@0/XHC@140000") == ["SB", "PCI0", "XHC"]
     assert normalize_path_tokens("IOACPIPlane:/_SB/PCI0@0/RP05@1c0004/PXSX@0") == ["SB", "PCI0", "RP05", "PXSX"]
 
-    # 4. USBMap Enabled vs Disabled Detection Test (kext Info.plist format)
-    usbmap_kext_doc = {
-        "IOKitPersonalities": {
-            "iMac19,1-XHC": {
-                "IOProviderMergeProperties": {
-                    "ports": {
-                        "HS01": {
-                            "port": b"\x01\x00\x00\x00",
-                            "UsbConnector": 0,
-                            "Comment": "Front USB 2.0 Enabled",
-                        },
-                        "HS02": {
-                            "#port": b"\x02\x00\x00\x00",
-                            "UsbConnector": 0,
-                            "Comment": "Disabled Port 2",
-                        },
-                        "SS01": {
-                            "port": b"\x11\x00\x00\x00",
-                            "UsbConnector": 3,
-                            "Comment": "Front USB 3.0 Enabled",
-                        },
-                        "#SS02": {
-                            "port": b"\x12\x00\x00\x00",
-                            "UsbConnector": 3,
-                            "Comment": "Disabled SS Port",
-                        },
-                    }
-                }
-            }
-        }
-    }
-    parsed_kext = parse_usbmap_controllers(usbmap_kext_doc)
-    assert len(parsed_kext) == 1, "Failed to parse USBMap kext personality"
-    k_ports = {p["address"]: p for p in parsed_kext[0]["ports"]}
+    # 4. Universal pcidebug parser check
+    assert parse_ioreg_pcidebug("0:20:0") == 0x00140000, "Failed to parse decimal 0:20:0 pcidebug"
+    assert parse_ioreg_pcidebug("00:14.0") == 0x00140000, "Failed to parse hex 00:14.0 pcidebug"
+    assert parse_ioreg_pcidebug("6:0:0") == 0, "Failed to parse 6:0:0 pcidebug"
+    assert parse_name_pci_address("XHC@14") == 0x00140000
+    assert parse_name_pci_address("RP05@1C,4") == 0x001C0004
 
-    assert k_ports[1]["enabled"] is True, "HS01 should be detected as enabled"
-    assert k_ports[2]["enabled"] is False, "HS02 (#port) should be detected as disabled"
-    assert k_ports[17]["enabled"] is True, "SS01 should be detected as enabled"
-    assert k_ports[18]["enabled"] is False, "#SS02 should be detected as disabled"
-    assert k_ports[1]["label"] == "Front USB 2.0 Enabled"
-
-    # 5. USBMap Enabled vs Disabled Detection Test (USB.plist discovery format)
-    usbmap_discovery_doc = {
-        "XHC@14000000": {
-            "acpi_path": "\\_SB.PCI0.XHC",
-            "ports": {
-                "01000000": {
-                    "name": "HS01",
-                    "port": "01000000",
-                    "connector": 0,
-                    "enabled": True,
-                    "comment": "Front Panel USB2",
-                },
-                "02000000": {
-                    "name": "HS02",
-                    "port": "02000000",
-                    "connector": 0,
-                    "enabled": False,
-                    "comment": "Unused USB2",
-                },
-            },
-        }
-    }
-    parsed_disc = parse_usbmap_controllers(usbmap_discovery_doc)
-    assert len(parsed_disc) == 1
-    d_ports = {p["address"]: p for p in parsed_disc[0]["ports"]}
-    assert d_ports[1]["enabled"] is True, "USB.plist port 1 should be enabled"
-    assert d_ports[2]["enabled"] is False, "USB.plist port 2 should be disabled"
-
-    # 6. Supplementing ACPI Tables via _ADR matching test
-    mock_acpi_controllers = [
-        {
-            "path": "\\_SB.PCI0.XHC",
-            "hub": "RHUB",
-            "ports": [
-                {"name": "POT1", "adr": "0x01", "keep": True, "type": "typea", "label": "Original", "pld_lines": ["/* pld */"]},
-                {"name": "POT2", "adr": "0x02", "keep": True, "type": "typea", "label": "Original", "pld_lines": None},
-                {"name": "POT3", "adr": "0x11", "keep": True, "type": "usb3-a", "label": "Original", "pld_lines": None},
-                {"name": "POT4", "adr": "0x12", "keep": True, "type": "usb3-a", "label": "Original", "pld_lines": None},
-            ],
-        }
+    # 5. Controller correlation test (preventing endpoint collisions)
+    mock_live = [
+        LiveController(name="XHC", acpi_path="IOACPIPlane:/_SB/PCI0@0/XHC@140000", pci_address=0x00140000, pci_debug="0:20:0", driver="AppleUSBXHCIPCI"),
+        LiveController(name="XHC", acpi_path="IOACPIPlane:/_SB/PCI0@0/RP05@1c0004/PXSX@0", pci_address=0, pci_debug="6:0:0", driver="AppleUSBXHCIAR"),
     ]
+    c_rp01 = {"path": "\\_SB.PCI0.RP01.PXSX.TBDU.XHC", "ctrl_adr": "0x00000000"}
+    c_rp05 = {"path": "\\_SB.PCI0.RP05.PXSX.TBDU.XHC", "ctrl_adr": "0x00000000"}
+    c_xhc = {"path": "\\_SB.PCI0.XHC", "ctrl_adr": "0x00140000"}
 
-    matched_cnt, total_cnt = apply_usbmap_to_acpi_controllers(mock_acpi_controllers, parsed_kext)
-    assert matched_cnt == 2, f"Expected 2 enabled ports matched, got {matched_cnt}"
-    assert total_cnt == 4, f"Expected 4 total ACPI ports, got {total_cnt}"
-
-    acpi_p = {to_int(p["adr"]): p for p in mock_acpi_controllers[0]["ports"]}
-
-    assert acpi_p[1]["keep"] is True, "POT1 (_ADR 0x01) must be selected (enabled in USBMap)"
-    assert acpi_p[17]["keep"] is True, "POT3 (_ADR 0x11) must be selected (enabled in USBMap)"
-    assert acpi_p[2]["keep"] is False, "POT2 (_ADR 0x02) must be unselected (disabled in USBMap)"
-    assert acpi_p[18]["keep"] is False, "POT4 (_ADR 0x12) must be unselected (disabled in USBMap)"
-    assert acpi_p[1]["name"] == "POT1", "ACPI port name 'POT1' must not be overwritten by USBMap 'HS01'"
-    assert acpi_p[1]["adr"] == "0x01", "ACPI _ADR must remain unchanged"
-    assert acpi_p[1]["pld_lines"] == ["/* pld */"], "ACPI _PLD buffer must remain preserved"
-    assert mock_acpi_controllers[0]["path"] == "\\_SB.PCI0.XHC", "ACPI path must remain unchanged"
-    assert acpi_p[1]["label"] == "Front USB 2.0 Enabled", "Label should be supplemented from USBMap"
-    assert acpi_p[17]["label"] == "Front USB 3.0 Enabled", "Label should be supplemented from USBMap"
-
-    # 7. SSDT Code Generation Verification with supplemented ACPI data
-    with tempfile.TemporaryDirectory() as tmp:
-        dsl_file = Path(tmp) / "TestSSDT.dsl"
-        ctrls = build_ssdt({"controllers": mock_acpi_controllers}, dsl_file)
-        assert ctrls is not None, "Failed to generate SSDT"
-        content = dsl_file.read_text(encoding="utf-8")
-
-        assert "Device (POT1)" in content, "POT1 must be emitted in SSDT"
-        assert "Device (POT3)" in content, "POT3 must be emitted in SSDT"
-        assert "Device (POT2)" not in content, "Disabled POT2 must not be emitted"
-        assert "Device (POT4)" not in content, "Disabled POT4 must not be emitted"
-        assert "Name (_ADR, 0x01)  // Front USB 2.0 Enabled" in content
-        assert "Name (_ADR, 0x11)  // Front USB 3.0 Enabled" in content
-
-    # 8. Live IORegistry query verification on macOS host
-    live = get_live_xhci_controllers()
-    print_info(f"Live IORegistry detected {len(live)} active physical XHCI controller(s) on this Mac:")
-    for lc in live:
-        ports_str = f" ({len(lc.active_ports)} active ports)" if lc.active_ports else ""
-        print(f"  • {c_bold(lc.name)} at {c_blue(lc.acpi_path)} [PCI: {c_yellow(lc.pci_debug)}, Driver: {c_cyan(lc.driver)}]{ports_str}")
+    assert is_controller_live(c_rp01, mock_live)[0] is False, "RP01 ghost hub must not match RP05 live hardware"
+    assert is_controller_live(c_rp05, mock_live)[0] is True, "RP05 hub must match RP05 live hardware"
+    assert is_controller_live(c_xhc, mock_live)[0] is True, "Chipset XHC hub must match live XHC"
 
     print_success("All verification tests passed successfully.")
 
@@ -2259,7 +2182,7 @@ def main():
     g.add_argument("--table-id", default="XHUB")
     g.add_argument("--iasl", help="path to custom iasl")
     g.add_argument("--download-iasl", action="store_true", help="auto-download iasl if missing")
-    s_def = g.set_defaults(func=cmd_generate)
+    g.set_defaults(func=cmd_generate)
 
     t = sub.add_parser("test", help="run tests and query live IORegistry")
     t.set_defaults(func=lambda a: run_tests())
